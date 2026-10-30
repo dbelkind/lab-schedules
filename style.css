@@ -1,0 +1,101 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1f2328;
+  --muted: #5f6670;
+  --line: #e2e2de;
+  --today: #fff8e6;
+  --error-bg: #fdecea;
+  --error-text: #8a1f17;
+  --hour-height: 56px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 24px 16px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+header, main { max-width: 1200px; margin: 0 auto; }
+h1 { margin: 0; font-size: 24px; }
+.muted { margin: 4px 0 16px; color: var(--muted); }
+
+.message {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.chip[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
+.chip[aria-pressed="false"] .dot { opacity: 0.25; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--member); }
+
+.calendar-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.calendar {
+  display: grid;
+  grid-template-columns: 56px repeat(var(--day-count), minmax(130px, 1fr));
+  min-width: fit-content;
+}
+
+.day-header {
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  font-weight: 600;
+  text-align: center;
+}
+.corner { border-bottom: 1px solid var(--line); }
+
+.hours, .day { position: relative; height: calc(var(--hour-count) * var(--hour-height)); }
+.day {
+  border-left: 1px solid var(--line);
+  background-image: linear-gradient(var(--line) 1px, transparent 1px);
+  background-size: 100% var(--hour-height);
+}
+.day-header.today, .day.today { background-color: var(--today); }
+
+.hour-label {
+  position: absolute;
+  right: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.entry {
+  position: absolute;
+  overflow: hidden;
+  padding: 3px 6px;
+  border-left: 4px solid var(--member);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--member) 16%, white);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.entry strong { display: block; }
