@@ -3,23 +3,254 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lab Schedule</title>
-  <link rel="stylesheet" href="style.css">
+  <title>Lifespan Cognition Lab Schedule</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
-  <header>
-    <h1>Lab Schedule</h1>
-    <p id="updated" class="muted"></p>
+  <header class="top-bar">
+    <div class="top-bar-inner">
+      <div class="brand">
+        <img class="brand-mark" src="assets/logo-mark.png" alt="" width="50" height="40">
+        <h1>Lifespan Cognition Lab Schedule</h1>
+      </div>
+      <nav id="page-nav" class="page-nav" aria-label="Pages" hidden>
+        <button type="button" class="page-link" data-page="calendar" aria-current="page">Calendar</button>
+        <button type="button" class="page-link" data-page="update">Update availability</button>
+        <button id="manage-link" type="button" class="page-link" data-page="manage" hidden>Lab Management</button>
+      </nav>
+      <div id="user-bar" class="user-bar" hidden>
+        <span id="user-email" class="user-email"></span>
+        <button id="sign-out" type="button" class="secondary small">Sign out</button>
+      </div>
+    </div>
   </header>
 
   <main>
     <div id="messages" role="status"></div>
+
+    <section id="signin-screen" class="center-card" hidden>
+      <h2>Sign in to add the times you can't be in the lab</h2>
+      <p class="muted">Use the Google account your lab reviewer added.</p>
+      <button id="sign-in" type="button" class="primary">Sign in with Google</button>
+    </section>
+
+    <section id="not-listed-screen" class="center-card" hidden>
+      <h2>You're not on the lab list yet</h2>
+      <p class="muted">You're signed in as <strong id="not-listed-email"></strong>. Ask your lab reviewer to add this email, then reload this page.</p>
+      <button id="not-listed-sign-out" type="button" class="link-button">Use a different account</button>
+    </section>
+
+    <div id="app-screen" hidden>
+    <section id="page-calendar">
+    <div class="calendar-heading">
+      <div>
+        <h2 id="calendar-scope" class="calendar-scope"></h2>
+        <p id="calendar-hint" class="muted calendar-hint"></p>
+      </div>
+      <div id="view-switch" class="segmented" role="group" aria-label="Calendar view" hidden>
+        <button type="button" data-view="unavailability" aria-pressed="true">Unavailability</button>
+        <button type="button" data-view="lab" aria-pressed="false">Lab events</button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button id="today" type="button" class="nav-button wide">Today</button>
+      <button id="prev-week" type="button" class="nav-button" aria-label="Previous week">&lsaquo;</button>
+      <button id="next-week" type="button" class="nav-button" aria-label="Next week">&rsaquo;</button>
+      <strong id="week-label" class="week-label" aria-live="polite"></strong>
+      <span id="calendar-status" class="status calendar-status" role="status"></span>
+    </div>
+
+    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update availability</button>.</p>
     <div id="filters" class="filters" aria-label="Filter by lab member"></div>
-    <div class="calendar-scroll">
-      <div id="calendar" class="calendar"></div>
+
+    <div class="calendar-layout">
+      <aside class="mini" aria-label="Jump to a date">
+        <div class="mini-nav">
+          <button id="prev-year" type="button" class="mini-button" aria-label="Previous year">&laquo;</button>
+          <button id="prev-month" type="button" class="mini-button" aria-label="Previous month">&lsaquo;</button>
+          <strong id="mini-label" aria-live="polite"></strong>
+          <button id="next-month" type="button" class="mini-button" aria-label="Next month">&rsaquo;</button>
+          <button id="next-year" type="button" class="mini-button" aria-label="Next year">&raquo;</button>
+        </div>
+        <div id="mini-grid" class="mini-grid"></div>
+      </aside>
+      <div class="calendar-scroll">
+        <div id="calendar" class="calendar"></div>
+      </div>
+    </div>
+
+    <p class="muted source-note">USC dates come from the <a href="https://usc.edu/academic-calendar/">official academic calendar</a> and cover Fall 2026 through Summer 2029. Shaded days are holidays or breaks, when classes aren't shown.</p>
+    </section>
+
+    <section id="page-update" class="upload" hidden>
+      <h2>Update your availability</h2>
+      <p>Add the times you <strong>can't</strong> work in the lab: your classes, other regular commitments, and time off. Any time you don't add here means you may be scheduled for work in the lab. As you get scheduled, please reach out to lab manager for any other potential issues or questions.</p>
+      <p class="muted">Uploaded files stay on your device and only the days and times are saved. Course names and rooms aren't. Only you and your lab's reviewers can see what you add.</p>
+
+      <div id="editing-banner" class="editing-banner" hidden>
+        <span id="editing-text"></span>
+        <button id="cancel-edit" type="button" class="link-button">Cancel</button>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab" role="tab" data-tab="class" aria-selected="true">Class schedule</button>
+        <button type="button" class="tab" role="tab" data-tab="conflict" aria-selected="false">Standing conflict</button>
+        <button type="button" class="tab" role="tab" data-tab="ooo" aria-selected="false">Request time off</button>
+        <button type="button" class="tab" role="tab" data-tab="entries" aria-selected="false">My availability</button>
+      </div>
+
+      <div id="panel-class">
+        <fieldset id="mode-fieldset" class="mode">
+          <legend>What are you submitting?</legend>
+          <label><input id="mode-new" type="radio" name="mode" checked> A schedule for the whole semester</label>
+          <label><input id="mode-changed" type="radio" name="mode"> A change to my schedule partway through</label>
+        </fieldset>
+
+        <label class="field">Semester
+          <select id="semester"></select>
+        </label>
+
+        <label class="field">Schedule file (PDF, PNG, JPG or WebP)
+          <input id="schedule-file" type="file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp">
+        </label>
+        <button id="manual" type="button" class="link-button">Or enter times by hand</button>
+
+        <div id="review" hidden>
+          <h3>Check your class times</h3>
+          <p class="muted">You'll be marked unavailable at these times. Automatic reading can make mistakes, so please compare them with your schedule.</p>
+          <div id="rows"></div>
+          <button id="add-row" type="button" class="link-button">Add another class time</button>
+
+          <div class="field-row">
+            <label class="field"><span id="from-label">First day of classes</span>
+              <input id="term-from" type="date">
+            </label>
+            <label class="field">Last day of classes
+              <input id="term-to" type="date">
+            </label>
+          </div>
+          <p class="muted">Dates must fall within the semester. Saving replaces your classes between these dates and keeps anything earlier. Classes aren't shown on USC holidays or breaks.</p>
+        </div>
+      </div>
+
+      <div id="panel-conflict" hidden>
+        <p class="muted">Other regular times you can't be in the lab, such as another job or a weekly appointment. Unlike classes, these still apply during holidays and breaks.</p>
+        <div id="conflict-rows"></div>
+        <button id="add-conflict-row" type="button" class="link-button">Add another unavailable time</button>
+        <div class="field-row">
+          <label class="field">Starts
+            <input id="conflict-from" type="date">
+          </label>
+          <label class="field">Ends (optional)
+            <input id="conflict-to" type="date">
+          </label>
+        </div>
+        <label class="field">Note (optional)
+          <input id="conflict-note" type="text" maxlength="60" autocomplete="off">
+        </label>
+      </div>
+
+      <div id="panel-ooo" hidden>
+        <p class="muted">Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it.</p>
+        <div class="field-row">
+          <label class="field">First day off
+            <input id="ooo-from" type="date">
+          </label>
+          <label class="field">Last day off
+            <input id="ooo-to" type="date">
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="field">From (optional)
+            <input id="ooo-start" type="time">
+          </label>
+          <label class="field">Until (optional)
+            <input id="ooo-end" type="time">
+          </label>
+        </div>
+        <p class="muted">Leave the times empty to take whole days off. Times only work for a single day.</p>
+        <label class="field">Note (optional)
+          <input id="ooo-note" type="text" maxlength="60" autocomplete="off">
+        </label>
+      </div>
+
+      <div id="panel-entries" hidden>
+        <div id="my-entries"></div>
+      </div>
+
+      <p id="upload-status" class="status" role="status"></p>
+
+      <button id="save" type="button" class="primary">Save</button>
+    </section>
+
+    <section id="page-manage" class="upload" hidden>
+      <h2>Lab Management</h2>
+      <p class="muted">Review requests from lab members and manage who has access and what they're trained for.</p>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="manage-tab" role="tab" data-manage="review" aria-selected="true">Review requests</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="members" aria-selected="false">Lab members</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="me" aria-selected="false">My information</button>
+      </div>
+
+      <div id="manage-review">
+        <div id="review-list"></div>
+      </div>
+
+      <div id="manage-me" hidden>
+        <p class="muted">Your own details and training. Your name and role are changed the same way as anyone else's, by adding your email again under Lab members.</p>
+        <div id="my-info"></div>
+      </div>
+
+      <div id="manage-members" hidden>
+        <div id="member-list"></div>
+        <h3>Add someone</h3>
+        <div class="field-row">
+          <label class="field">USC email
+            <input id="new-member-email" type="email" autocomplete="off">
+          </label>
+          <label class="field">Name
+            <input id="new-member-name" type="text" autocomplete="off">
+          </label>
+          <label class="field">Role
+            <select id="new-member-role">
+              <option value="member">Member (sees only their own)</option>
+              <option value="reviewer">Reviewer (sees everyone, reviews requests)</option>
+            </select>
+          </label>
+        </div>
+        <div id="new-member-skills"></div>
+        <button id="add-member" type="button" class="primary">Add to lab</button>
+        <p class="muted">To change someone's training, update it above and save. To change their name or role, add them again with the same email.</p>
+      </div>
+
+      <p id="manage-status" class="status" role="status"></p>
+    </section>
     </div>
   </main>
 
-  <script src="app.js"></script>
+  <dialog id="event-dialog" class="event-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-head">
+      <h2 id="dialog-title"></h2>
+      <button id="dialog-close" type="button" class="icon-button" aria-label="Close">&times;</button>
+    </div>
+    <div id="dialog-body" class="dialog-body"></div>
+    <p id="dialog-status" class="status" role="status"></p>
+    <div id="dialog-actions" class="dialog-actions"></div>
+  </dialog>
+
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" integrity="sha384-ZaR6mWzmJtrRibZ1Vm7SoHFr8OXjyAuGAXalGDKqbxFT18oi/z+oZLIRFkpeNor1" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" integrity="sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" integrity="sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3" crossorigin="anonymous"></script>
+  <script src="firebase-config.js?v=2"></script>
+  <script src="store.js?v=3"></script>
+  <script src="parser.js?v=2"></script>
+  <script src="scheduling.js?v=3"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

@@ -1,0 +1,120 @@
+{
+  "note": "USC staff holidays, when no participant visits are scheduled. From USC's Paid University Holidays policy: New Year's Day, Martin Luther King Jr. Day, Presidents' Day, Memorial Day, Independence Day, Labor Day, Thanksgiving Day, the day after Thanksgiving and Christmas Day, plus winter recess. A holiday on a Saturday is observed the Friday before, and one on a Sunday the Monday after. USC may add a bridge day when a holiday falls on a Tuesday or Thursday; add those here when USC announces them. The 2026 winter break is extended for staff to match the student winter recess.",
+  "holidays": [
+    {
+      "name": "Thanksgiving",
+      "from": "2026-11-26",
+      "to": "2026-11-27"
+    },
+    {
+      "name": "Winter break",
+      "from": "2026-12-17",
+      "to": "2027-01-10"
+    },
+    {
+      "name": "MLK Day",
+      "from": "2027-01-18",
+      "to": "2027-01-18"
+    },
+    {
+      "name": "Presidents' Day",
+      "from": "2027-02-15",
+      "to": "2027-02-15"
+    },
+    {
+      "name": "Memorial Day",
+      "from": "2027-05-31",
+      "to": "2027-05-31"
+    },
+    {
+      "name": "Independence Day (observed)",
+      "from": "2027-07-05",
+      "to": "2027-07-05"
+    },
+    {
+      "name": "Labor Day",
+      "from": "2027-09-06",
+      "to": "2027-09-06"
+    },
+    {
+      "name": "Thanksgiving",
+      "from": "2027-11-25",
+      "to": "2027-11-26"
+    },
+    {
+      "name": "Winter recess",
+      "from": "2027-12-24",
+      "to": "2027-12-31"
+    },
+    {
+      "name": "MLK Day",
+      "from": "2028-01-17",
+      "to": "2028-01-17"
+    },
+    {
+      "name": "Presidents' Day",
+      "from": "2028-02-21",
+      "to": "2028-02-21"
+    },
+    {
+      "name": "Memorial Day",
+      "from": "2028-05-29",
+      "to": "2028-05-29"
+    },
+    {
+      "name": "Independence Day",
+      "from": "2028-07-04",
+      "to": "2028-07-04"
+    },
+    {
+      "name": "Labor Day",
+      "from": "2028-09-04",
+      "to": "2028-09-04"
+    },
+    {
+      "name": "Thanksgiving",
+      "from": "2028-11-23",
+      "to": "2028-11-24"
+    },
+    {
+      "name": "Winter recess",
+      "from": "2028-12-25",
+      "to": "2029-01-01"
+    },
+    {
+      "name": "MLK Day",
+      "from": "2029-01-15",
+      "to": "2029-01-15"
+    },
+    {
+      "name": "Presidents' Day",
+      "from": "2029-02-19",
+      "to": "2029-02-19"
+    },
+    {
+      "name": "Memorial Day",
+      "from": "2029-05-28",
+      "to": "2029-05-28"
+    },
+    {
+      "name": "Independence Day",
+      "from": "2029-07-04",
+      "to": "2029-07-04"
+    },
+    {
+      "name": "Labor Day",
+      "from": "2029-09-03",
+      "to": "2029-09-03"
+    },
+    {
+      "name": "Thanksgiving",
+      "from": "2029-11-22",
+      "to": "2029-11-23"
+    },
+    {
+      "name": "Winter recess",
+      "from": "2029-12-25",
+      "to": "2030-01-01"
+    }
+  ]
+}

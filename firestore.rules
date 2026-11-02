@@ -1,0 +1,109 @@
+rules_version = '2';
+
+// These rules are what keep schedules private. The site's code runs in people's browsers and can't enforce anything.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function email() {
+      return request.auth.token.email.lower();
+    }
+    function verified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function memberPath() {
+      return /databases/$(database)/documents/members/$(email());
+    }
+    function isMember() {
+      return verified() && exists(memberPath());
+    }
+    function isReviewer() {
+      return isMember() && get(memberPath()).data.role == 'reviewer';
+    }
+    function owns(data) {
+      return isMember() && data.ownerEmail == email();
+    }
+    function shortNote(data) {
+      return !('note' in data) || (data.note is string && data.note.size() <= 100);
+    }
+    function validAvailability(data) {
+      return data.keys().hasAll(['ownerEmail', 'type', 'days', 'start', 'end', 'from'])
+        && data.keys().hasOnly(['ownerEmail', 'type', 'days', 'start', 'end', 'from', 'to', 'semester', 'note'])
+        && data.type in ['class', 'conflict']
+        && data.days is list && data.days.size() > 0
+        && data.start is string && data.end is string && data.start < data.end
+        && data.from is string
+        && (!('to' in data) || (data.to is string && data.from <= data.to))
+        && shortNote(data);
+    }
+    // Members can only ever submit a request as pending, so approving is left to reviewers.
+    // A request with times covers part of a single day.
+    function validRequest(data) {
+      return data.keys().hasAll(['ownerEmail', 'from', 'to', 'status'])
+        && data.keys().hasOnly(['ownerEmail', 'from', 'to', 'start', 'end', 'note', 'status'])
+        && data.status == 'pending'
+        && data.from is string && data.to is string && data.from <= data.to
+        && (!('start' in data) || (data.start is string && data.end is string && data.start < data.end && data.from == data.to))
+        && shortNote(data);
+    }
+    function validDecision() {
+      let data = request.resource.data;
+      return data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewNote', 'reviewedBy', 'reviewedAt'])
+        && data.status in ['approved', 'declined']
+        && data.reviewedBy == email()
+        && (!('reviewNote' in data) || (data.reviewNote is string && data.reviewNote.size() <= 200));
+    }
+
+    match /members/{memberEmail} {
+      allow get: if verified() && (memberEmail == email() || isReviewer());
+      allow list: if isReviewer();
+      allow create, update: if isReviewer()
+        && memberEmail == memberEmail.lower()
+        && request.resource.data.keys().hasOnly(['name', 'role', 'skills'])
+        && request.resource.data.name is string && request.resource.data.name.size() > 0
+        && request.resource.data.role in ['member', 'reviewer']
+        && (!('skills' in request.resource.data)
+          || (request.resource.data.skills is list && request.resource.data.skills.size() <= 7));
+      allow delete: if isReviewer() && memberEmail != email();
+    }
+
+    // Members can add new entries, but changing or removing a saved one goes through a change request,
+    // which only a reviewer can apply.
+    match /availability/{id} {
+      allow read: if owns(resource.data) || isReviewer();
+      allow create: if (owns(request.resource.data) || isReviewer()) && validAvailability(request.resource.data);
+      allow update: if isReviewer() && validAvailability(request.resource.data);
+      allow delete: if isReviewer();
+    }
+
+    match /changeRequests/{id} {
+      allow read: if owns(resource.data) || isReviewer();
+      allow create: if owns(request.resource.data)
+        && request.resource.data.keys().hasOnly(['ownerEmail', 'status', 'summary', 'plan', 'createdAt'])
+        && request.resource.data.status == 'pending'
+        && request.resource.data.summary is string && request.resource.data.summary.size() <= 500
+        && request.resource.data.plan is map
+        && request.resource.data.plan.keys().hasOnly(['creates', 'updates', 'deletes'])
+        && request.resource.data.plan.creates is list && request.resource.data.plan.creates.size() <= 50
+        && request.resource.data.plan.updates is list && request.resource.data.plan.updates.size() <= 50
+        && request.resource.data.plan.deletes is list && request.resource.data.plan.deletes.size() <= 50;
+      allow update: if isReviewer() && validDecision();
+      allow delete: if owns(resource.data) || isReviewer();
+    }
+
+    match /appointments/{id} {
+      allow read: if isReviewer();
+      allow create, update: if isReviewer()
+        && request.resource.data.keys().hasOnly(['date', 'defaultFor', 'cancelled', 'lab', 'scan'])
+        && request.resource.data.date is string;
+      allow delete: if isReviewer();
+    }
+
+    match /timeOff/{id} {
+      allow read: if owns(resource.data) || isReviewer();
+      allow create: if owns(request.resource.data) && validRequest(request.resource.data);
+      // Replacing a request drops its old decision, so an edit always goes back for review.
+      allow update: if (owns(resource.data) && owns(request.resource.data) && validRequest(request.resource.data))
+        || (isReviewer() && validDecision());
+      allow delete: if owns(resource.data) || isReviewer();
+    }
+  }
+}
