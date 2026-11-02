@@ -161,6 +161,23 @@ function isReviewer() {
   return me && me.role === "reviewer";
 }
 
+// Grad Students/Post-Docs only see their own schedule, like RAs, but their changes and time off save without review.
+// "member" is the older name for RA.
+const ROLE_LABELS = { reviewer: "Reviewer", grad: "Grad Student/Post-Doc", ra: "RA", member: "RA" };
+
+function isGrad() {
+  return me && me.role === "grad";
+}
+
+function changesNeedReview() {
+  return !isReviewer() && !isGrad();
+}
+
+// Everyone's own time off is reviewed except a Grad Student/Post-Doc's (reviewers can approve their own).
+function ownTimeOffNeedsReview() {
+  return !isGrad();
+}
+
 // Reviewers can enter times for any lab member; everyone else always works on their own.
 function targetEmail() {
   return isReviewer() && actingFor ? actingFor : me.email;
@@ -672,13 +689,25 @@ function openEntryDialog(block, proposed) {
   if (pendingEntryIds().has(entry.id)) body.push(el("p", "notice", "A change to this entry is already waiting for review."));
   if (proposed) body.push(el("p", "notice", "Check the new times, then save to keep them."));
   body.push(labeled("Days", days.node), times.node);
-  if (!isReviewer()) {
+  let noteInput = null;
+  if (entry.type === "conflict") {
+    noteInput = inputOf("text", entry.note || "");
+    noteInput.maxLength = 60;
+    body.push(labeled("Notes/Reason", noteInput));
+  }
+  if (changesNeedReview()) {
     body.push(el("p", "muted", "Changes go to a reviewer. Your current times stay in place until the change is approved."));
+  } else if (isGrad()) {
+    body.push(el("p", "muted", "Changes save straight away, and reviewers are emailed about them."));
   }
   const title = entry.ownerEmail === me.email ? `Edit ${kindLabel.toLowerCase()}` : `Edit ${nameFor(entry.ownerEmail)}'s ${kindLabel.toLowerCase()}`;
   openDialog(title, body, [
-    dialogButton(isReviewer() ? "Save" : "Send for review", "primary", async () => {
+    dialogButton(changesNeedReview() ? "Send for review" : "Save", "primary", async () => {
       const updated = { ...withoutId(entry), days: days.read(), ...times.read() };
+      if (noteInput) {
+        updated.note = noteInput.value.trim();
+        if (!updated.note) throw new Error("Please add Notes/Reason.");
+      }
       checkRows([updated]);
       const message = await proposeChange({ updates: [{ id: entry.id, data: updated }] }, `Change "${describeEntry(entry)}" to "${describeEntry(updated)}"`);
       await refresh();
@@ -734,7 +763,9 @@ function openNewConflictDialog(iso, start, end) {
     untilField.hidden = repeat.value !== "until";
     dateField.firstChild.textContent = once ? "Date" : "Starts";
     help.textContent = once
-      ? "A one-time time is sent as a time off request, so a reviewer approves it before it counts."
+      ? ownTimeOffNeedsReview()
+        ? "A one-time time is sent as a time off request, so a reviewer approves it before it counts."
+        : "A one-time time is saved as time off."
       : "This repeats every week on the days you choose and is saved straight away.";
   };
   // The label's text is its first child, so it can change between "Date" and "Starts".
@@ -748,17 +779,18 @@ function openNewConflictDialog(iso, start, end) {
     times.node,
     dateField,
     untilField,
-    labeled("Note (optional)", noteInput),
+    labeled("Notes/Reason", noteInput),
     help,
   ], [
     dialogButton("Save", "primary", async () => {
       const note = noteInput.value.trim();
       const from = dateInput.value;
       if (!from) throw new Error("Please choose a date.");
+      if (!note) throw new Error("Please add Notes/Reason.");
       if (repeat.value === "once") {
-        await Store.saveTimeOff(null, timeOffDoc(me.email, { from, to: from, note, ...times.read() }));
+        const message = await saveTimeOffFor(me.email, null, { from, to: from, note, ...times.read() });
         await refresh();
-        return "Sent for review as a time off request.";
+        return message;
       }
       const row = { days: days.read(), ...times.read() };
       checkRows([row]);
@@ -1250,7 +1282,9 @@ function readConflictForm() {
   const to = document.getElementById("conflict-to").value;
   if (!from) throw new Error("Please choose when this conflict starts.");
   if (to && to < from) throw new Error("The end date must be on or after the start date.");
-  return { from, to, rows, note: document.getElementById("conflict-note").value.trim() };
+  const note = document.getElementById("conflict-note").value.trim();
+  if (!note) throw new Error("Please add Notes/Reason.");
+  return { from, to, rows, note };
 }
 
 function readTimeOffForm() {
@@ -1260,6 +1294,7 @@ function readTimeOffForm() {
   const end = document.getElementById("ooo-end").value;
   if (!from || !to || to < from) throw new Error("Please choose a first and last day off.");
   const form = { from, to, note: document.getElementById("ooo-note").value.trim() };
+  if (!form.note) throw new Error("Please add Notes/Reason.");
   if (!start && !end) return form;
   if (from !== to) throw new Error("Times can only be set when the first and last day are the same. Leave them empty for whole days.");
   if (!validTime(start) || !validTime(end) || end <= start) throw new Error("The end time must be after the start time.");
@@ -1303,10 +1338,22 @@ function timeOffDoc(ownerEmail, { from, to, note, start, end }) {
 }
 
 // Time off a reviewer enters for someone else counts as approved as soon as it's saved.
+// Grad Students/Post-Docs approve their own time off as they save it.
 function timeOffFor(ownerEmail, form) {
   const doc = timeOffDoc(ownerEmail, form);
-  if (ownerEmail === me.email) return doc;
+  if (ownerEmail === me.email && !isGrad()) return doc;
   return { ...doc, status: "approved", reviewedBy: me.email, reviewedAt: dateToIso(new Date()) };
+}
+
+async function saveTimeOffFor(ownerEmail, id, form) {
+  const doc = timeOffFor(ownerEmail, form);
+  await Store.saveTimeOff(id, doc);
+  if (ownerEmail !== me.email) return "Saved.";
+  if (isGrad()) {
+    await leaveNotice("timeOff", `Time off: ${describeTimeOff(doc)}`);
+    return "Saved. Reviewers have been told about your time off.";
+  }
+  return "Sent for review. It will appear on the calendar once it's approved.";
 }
 
 function describeEntry(block) {
@@ -1360,12 +1407,14 @@ function startEditing(collection, entry) {
 function updateEditingBanner() {
   document.getElementById("editing-banner").hidden = !editing;
   document.getElementById("mode-fieldset").hidden = Boolean(editing);
-  document.getElementById("editing-text").textContent = editing && editing.collection === "timeOff" && !enteringForOther()
+  document.getElementById("editing-text").textContent = editing && editing.collection === "timeOff" && !enteringForOther() && ownTimeOffNeedsReview()
     ? "You're editing a request. Saving sends it back for review, and it won't count as approved until it's reviewed again."
     : enteringForOther()
       ? `You're editing ${nameFor(targetEmail())}'s saved entry. Changes save straight away.`
       : isReviewer()
       ? "You're editing a saved entry."
+      : isGrad()
+      ? "You're editing a saved entry. Changes save straight away, and reviewers are emailed about them."
       : "You're editing a saved entry. Saving sends the change to a reviewer, and your current times stay in place until it's approved.";
 }
 
@@ -1392,7 +1441,7 @@ function personHeader(person) {
   if (person.color) avatar.style.setProperty("--member", person.color);
   avatar.setAttribute("aria-hidden", "true");
   const name = el("div", "person-name", person.name);
-  if (person.role === "reviewer") name.append(el("span", "role-badge", "Reviewer"));
+  if (person.role) name.append(el("span", `role-badge role-${person.role === "member" ? "ra" : person.role}`, ROLE_LABELS[person.role] || "RA"));
   if (me && person.email === me.email) name.append(el("span", "role-badge you", "You"));
   const text = el("div", "person-text");
   text.append(name, el("div", "person-email", person.email));
@@ -1422,11 +1471,21 @@ function pendingEntryIds() {
 }
 
 // Members can add entries straight away, but changing or removing a saved one needs a reviewer's approval.
+function leaveNotice(kind, summary) {
+  return Store.createNotice({ ownerEmail: me.email, kind, summary, createdAt: new Date().toISOString() });
+}
+
 async function proposeChange(plan, summary) {
   const full = { creates: [], updates: [], deletes: [], ...plan };
-  if (isReviewer() || (!full.updates.length && !full.deletes.length)) {
+  const changesSaved = full.updates.length || full.deletes.length;
+  if (isReviewer() || !changesSaved) {
     await Store.applyClassPlan(full);
     return "Saved.";
+  }
+  if (isGrad()) {
+    await Store.applyClassPlan(full);
+    await leaveNotice("change", summary);
+    return "Saved. Reviewers have been told about the change.";
   }
   await Store.createChangeRequest({ ownerEmail: me.email, status: "pending", summary, plan: full, createdAt: dateToIso(new Date()) });
   return "Sent for review. Your saved times stay as they are until a reviewer approves the change.";
@@ -1612,12 +1671,47 @@ function skillPicker(selectedSkills, { trackChanges = false, onChange = () => {}
   return { node, read: () => boxes.filter((box) => box.checked).map((box) => box.value) };
 }
 
+// Only the fields the database keeps for a person, so saving one setting never drops another.
+function memberData(member, changes = {}) {
+  return {
+    name: member.name,
+    role: member.role,
+    skills: member.skills || [],
+    ...(member.notify !== undefined ? { notify: member.notify } : {}),
+    ...changes,
+  };
+}
+
+function notifySwitch(self) {
+  const wrapper = el("div", "notify-setting");
+  const label = el("label", "check-field");
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = self.notify !== false;
+  box.addEventListener("change", async () => {
+    box.disabled = true;
+    try {
+      await Store.saveMember(self.email, memberData(self, { notify: box.checked }));
+      await refresh();
+      setStatus(box.checked ? "You'll get an email when requests need review." : "You won't get emails about requests.");
+    } catch (error) {
+      box.checked = !box.checked;
+      setStatus(friendlyError(error), true);
+    } finally {
+      box.disabled = false;
+    }
+  });
+  label.append(box, "Email me when requests need review");
+  wrapper.append(label, el("p", "muted", "New time off requests and schedule changes are emailed within about 10 minutes, once per request. Your own requests aren't emailed to you."));
+  return wrapper;
+}
+
 function memberRow(member) {
   const own = member.email === me.email;
   const unsavedNote = el("span", "unsaved-note", "Unsaved changes");
   unsavedNote.hidden = true;
   const save = actionButton("Saved training", async () => {
-    await Store.saveMember(member.email, { name: member.name, role: member.role, skills: skills.read() });
+    await Store.saveMember(member.email, memberData(member, { skills: skills.read() }));
     await refresh();
     setStatus(own ? "Saved your training." : `Saved ${member.name}'s training.`);
   });
@@ -1642,6 +1736,30 @@ function memberRow(member) {
       await refresh();
       setStatus(`Removed ${member.name} and their schedule.`);
     }));
+  }
+  if (!own) {
+    const role = el("select", "role-select");
+    role.setAttribute("aria-label", `${member.name}'s role`);
+    for (const value of ["ra", "grad", "reviewer"]) {
+      const option = el("option", "", ROLE_LABELS[value]);
+      option.value = value;
+      role.append(option);
+    }
+    role.value = member.role === "member" ? "ra" : member.role;
+    role.addEventListener("change", async () => {
+      role.disabled = true;
+      try {
+        await Store.saveMember(member.email, memberData(member, { role: role.value }));
+        await refresh();
+        setStatus(`${member.name} is now ${role.value === "ra" ? "an" : "a"} ${ROLE_LABELS[role.value]}.`);
+      } catch (error) {
+        role.value = member.role === "member" ? "ra" : member.role;
+        setStatus(friendlyError(error), true);
+      } finally {
+        role.disabled = false;
+      }
+    });
+    buttons.unshift(labeled("Role", role));
   }
   const row = el("div", "member-card");
   row.dataset.email = member.email;
@@ -1718,7 +1836,7 @@ function renderMemberList() {
       : [el("p", "muted", "Choose people above to see and edit their training.")]));
   }
   const self = members.find((member) => member.email === me.email);
-  document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self)] : []));
+  document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self), notifySwitch(self)] : []));
 }
 
 let newMemberSkills = null;
@@ -1753,7 +1871,7 @@ function friendlyError(error) {
 function updateSaveVisibility() {
   const needsReview = activeTab === "class" && reviewEl.hidden;
   saveButton.hidden = needsReview || activeTab === "entries";
-  saveButton.textContent = activeTab === "ooo" && !enteringForOther() ? "Send for review" : "Save";
+  saveButton.textContent = activeTab === "ooo" && !enteringForOther() && ownTimeOffNeedsReview() ? "Send for review" : "Save";
 }
 
 function clearEditing() {
@@ -1809,8 +1927,7 @@ async function saveActiveTab() {
       done = await proposeChange({ creates: [first, ...others] }, "");
     }
   } else {
-    await Store.saveTimeOff(editingId, timeOffFor(owner, readTimeOffForm()));
-    done = owner === me.email ? "Sent for review. It will appear on the calendar once it's approved." : "Saved.";
+    done = await saveTimeOffFor(owner, editingId, readTimeOffForm());
   }
   await refresh();
   resetForm();
@@ -1937,6 +2054,9 @@ async function handleAuthChange(user) {
     me = member;
     document.getElementById("manage-link").hidden = !isReviewer();
     document.getElementById("view-switch").hidden = !isReviewer();
+    document.getElementById("ooo-help").textContent = ownTimeOffNeedsReview()
+      ? "Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it."
+      : "Add time you won't be in the lab, either whole days or part of a single day. It's saved straight away, and reviewers are emailed about it.";
     if (isReviewer()) renderNewMemberSkills();
     showScreen("app");
     await refresh();
@@ -1945,7 +2065,9 @@ async function handleAuthChange(user) {
       (timeOff.some((request) => request.status === "pending") || changeRequests.some((request) => request.status === "pending"));
     showTab("class");
     showManageTab("review");
-    showPage(hasPending ? "manage" : "calendar");
+    // Links in request emails end in #review, which opens Review requests.
+    const fromEmail = isReviewer() && (window.location || {}).hash === "#review";
+    showPage(hasPending || fromEmail ? "manage" : "calendar");
   } catch (error) {
     showMessage(`Couldn't load your unavailable times (${friendlyError(error)}).`);
   }

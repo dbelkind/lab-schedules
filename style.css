@@ -768,3 +768,12 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .multi-option { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: var(--radius-small); cursor: pointer; }
 .multi-option:hover { background: var(--surface-muted); }
 .multi-option .avatar { width: 30px; height: 30px; font-size: 12px; }
+
+.notify-setting { margin: 16px 0 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.notify-setting .check-field { margin: 0; }
+.notify-setting p { margin: 6px 0 0; font-size: 13px; }
+
+.role-badge.role-grad { background: #ede9fe; color: #5b21b6; }
+.role-badge.role-ra { background: var(--surface-muted); color: #475553; }
+.member-card-top .field { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+.role-select { height: 32px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: var(--surface); font: inherit; font-size: 13px; }

@@ -60,6 +60,8 @@ const Store = (() => {
     },
 
     listChangeRequests: (ownerEmail) => listAll("changeRequests", ownerEmail),
+    // Tells reviewers about a Grad Student/Post-Doc's change; the Apps Script emails these and then deletes them.
+    createNotice: (data) => db.collection("notices").add(data),
     createChangeRequest: (data) => db.collection("changeRequests").add(data),
     deleteChangeRequest: (id) => db.collection("changeRequests").doc(id).delete(),
     decideChangeRequest: (id, decision) => db.collection("changeRequests").doc(id).update(decision),

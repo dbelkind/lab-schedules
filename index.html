@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=13">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -156,13 +156,13 @@
             <input id="conflict-to" type="date">
           </label>
         </div>
-        <label class="field">Note (optional)
-          <input id="conflict-note" type="text" maxlength="60" autocomplete="off">
+        <label class="field">Notes/Reason
+          <input id="conflict-note" type="text" maxlength="60" autocomplete="off" required>
         </label>
       </div>
 
       <div id="panel-ooo" hidden>
-        <p class="muted">Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it.</p>
+        <p id="ooo-help" class="muted">Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it.</p>
         <div class="field-row">
           <label class="field">First day off
             <input id="ooo-from" type="date">
@@ -180,8 +180,8 @@
           </label>
         </div>
         <p class="muted">Leave the times empty to take whole days off. Times only work for a single day.</p>
-        <label class="field">Note (optional)
-          <input id="ooo-note" type="text" maxlength="60" autocomplete="off">
+        <label class="field">Notes/Reason
+          <input id="ooo-note" type="text" maxlength="60" autocomplete="off" required>
         </label>
       </div>
 
@@ -226,14 +226,15 @@
           </label>
           <label class="field">Role
             <select id="new-member-role">
-              <option value="member">Member (sees only their own)</option>
+              <option value="ra">RA (sees only their own; changes need review)</option>
+              <option value="grad">Grad Student/Post-Doc (sees only their own; changes save without review)</option>
               <option value="reviewer">Reviewer (sees everyone, reviews requests)</option>
             </select>
           </label>
         </div>
         <div id="new-member-skills"></div>
         <button id="add-member" type="button" class="primary">Add to lab</button>
-        <p class="muted">To change someone's training, update it above and save. To change their name or role, add them again with the same email.</p>
+        <p class="muted">To change someone's role or training, use their card above. To change their name, add them again with the same email.</p>
       </div>
 
       <p id="manage-status" class="status" role="status"></p>
@@ -255,9 +256,9 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" integrity="sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" integrity="sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3" crossorigin="anonymous"></script>
   <script src="firebase-config.js?v=2"></script>
-  <script src="store.js?v=3"></script>
+  <script src="store.js?v=4"></script>
   <script src="parser.js?v=2"></script>
   <script src="scheduling.js?v=4"></script>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

@@ -18,6 +18,10 @@ service cloud.firestore {
     function isReviewer() {
       return isMember() && get(memberPath()).data.role == 'reviewer';
     }
+    // Grad Students/Post-Docs change their own entries and approve their own time off without review.
+    function isGrad() {
+      return isMember() && get(memberPath()).data.role == 'grad';
+    }
     function owns(data) {
       return isMember() && data.ownerEmail == email();
     }
@@ -32,12 +36,14 @@ service cloud.firestore {
         && data.start is string && data.end is string && data.start < data.end
         && data.from is string
         && (!('to' in data) || (data.to is string && data.from <= data.to))
+        && (data.type != 'conflict' || ('note' in data && data.note is string && data.note.size() > 0))
         && shortNote(data);
     }
     // Members can only ever submit a request as pending, so approving is left to reviewers.
     // A request with times covers part of a single day.
     function validRequest(data) {
-      return data.keys().hasAll(['ownerEmail', 'from', 'to', 'status'])
+      return data.keys().hasAll(['ownerEmail', 'from', 'to', 'status', 'note'])
+        && data.note is string && data.note.size() > 0
         && data.keys().hasOnly(['ownerEmail', 'from', 'to', 'start', 'end', 'note', 'status'])
         && data.status == 'pending'
         && data.from is string && data.to is string && data.from <= data.to
@@ -55,6 +61,16 @@ service cloud.firestore {
         && (!('start' in data) || (data.start is string && data.end is string && data.start < data.end && data.from == data.to))
         && shortNote(data);
     }
+    function validSelfApproved(data) {
+      return data.keys().hasAll(['ownerEmail', 'from', 'to', 'status', 'reviewedBy', 'reviewedAt', 'note'])
+        && data.keys().hasOnly(['ownerEmail', 'from', 'to', 'start', 'end', 'note', 'status', 'reviewedBy', 'reviewedAt'])
+        && data.status == 'approved'
+        && data.reviewedBy == email()
+        && data.note is string && data.note.size() > 0
+        && data.from is string && data.to is string && data.from <= data.to
+        && (!('start' in data) || (data.start is string && data.end is string && data.start < data.end && data.from == data.to))
+        && shortNote(data);
+    }
     function validDecision() {
       let data = request.resource.data;
       return data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewNote', 'reviewedBy', 'reviewedAt'])
@@ -68,11 +84,12 @@ service cloud.firestore {
       allow list: if isReviewer();
       allow create, update: if isReviewer()
         && memberEmail == memberEmail.lower()
-        && request.resource.data.keys().hasOnly(['name', 'role', 'skills'])
+        && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify'])
         && request.resource.data.name is string && request.resource.data.name.size() > 0
-        && request.resource.data.role in ['member', 'reviewer']
+        && request.resource.data.role in ['member', 'ra', 'grad', 'reviewer']
         && (!('skills' in request.resource.data)
-          || (request.resource.data.skills is list && request.resource.data.skills.size() <= 7));
+          || (request.resource.data.skills is list && request.resource.data.skills.size() <= 7))
+        && (!('notify' in request.resource.data) || request.resource.data.notify is bool);
       allow delete: if isReviewer() && memberEmail != email();
     }
 
@@ -81,8 +98,9 @@ service cloud.firestore {
     match /availability/{id} {
       allow read: if owns(resource.data) || isReviewer();
       allow create: if (owns(request.resource.data) || isReviewer()) && validAvailability(request.resource.data);
-      allow update: if isReviewer() && validAvailability(request.resource.data);
-      allow delete: if isReviewer();
+      allow update: if (isReviewer() || (isGrad() && owns(resource.data) && owns(request.resource.data)))
+        && validAvailability(request.resource.data);
+      allow delete: if isReviewer() || (isGrad() && owns(resource.data));
     }
 
     match /changeRequests/{id} {
@@ -100,6 +118,16 @@ service cloud.firestore {
       allow delete: if owns(resource.data) || isReviewer();
     }
 
+    // A Grad Student/Post-Doc's change leaves a notice; the Apps Script emails reviewers about it and deletes it.
+    match /notices/{id} {
+      allow read, delete: if isReviewer();
+      allow create: if owns(request.resource.data) && isGrad()
+        && request.resource.data.keys().hasOnly(['ownerEmail', 'kind', 'summary', 'createdAt'])
+        && request.resource.data.kind in ['change', 'timeOff']
+        && request.resource.data.summary is string && request.resource.data.summary.size() <= 600
+        && request.resource.data.createdAt is string;
+    }
+
     match /appointments/{id} {
       allow read: if isReviewer();
       allow create, update: if isReviewer()
@@ -111,9 +139,11 @@ service cloud.firestore {
     match /timeOff/{id} {
       allow read: if owns(resource.data) || isReviewer();
       allow create: if (owns(request.resource.data) && validRequest(request.resource.data))
+        || (owns(request.resource.data) && isGrad() && validSelfApproved(request.resource.data))
         || (isReviewer() && validEnteredByReviewer(request.resource.data));
       // Replacing a request drops its old decision, so a member's edit always goes back for review.
       allow update: if (owns(resource.data) && owns(request.resource.data) && validRequest(request.resource.data))
+        || (owns(resource.data) && owns(request.resource.data) && isGrad() && validSelfApproved(request.resource.data))
         || (isReviewer() && validDecision())
         || (isReviewer() && validEnteredByReviewer(request.resource.data));
       allow delete: if owns(resource.data) || isReviewer();

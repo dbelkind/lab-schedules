@@ -1,5 +1,6 @@
-// Copies participant visit staffing from the Lifespan Cognition Lab Schedule into a "Lab Staffing" Google Calendar.
-// Run setUp() once from the Apps Script editor: it syncs straight away and then every hour.
+// Copies participant visit staffing from the Lifespan Cognition Lab Schedule into a "Lab Staffing" Google Calendar,
+// and emails reviewers when new requests are waiting for them.
+// Run setUp() once from the Apps Script editor: it syncs the calendar every hour and checks for requests every 10 minutes.
 //
 // The staffing rules aren't copied here. They're loaded from the published site's scheduling.js on every run,
 // so the calendar always matches what the website shows.
@@ -15,18 +16,21 @@ const CONFIG = {
   timeZone: "America/Los_Angeles",
 };
 
-// Google Calendar's event colors: 10 is green (Basil), 6 is orange (Tangerine) and 11 is red (Tomato).
-const COLORS_BY_STATE = { ready: "10", tight: "6", problem: "11" };
-const TITLE_MARKS = { ready: ["✅", ""], tight: ["🟠", " (tight timing)"], problem: ["⚠️", " (can't fully staff)"] };
+// Google Calendar's event colors: 10 is green (Basil), 5 is yellow (Banana) and 11 is red (Tomato).
+// Event colors look the same to everyone the calendar is shared with, unlike the calendar's own color.
+const COLORS_BY_STATE = { ready: "10", tight: "5", problem: "11" };
+const TITLE_MARKS = { ready: ["✅", ""], tight: ["🟡", " (tight timing)"], problem: ["⚠️", " (can't fully staff)"] };
 
 const RULE_NAMES = ["appointmentsOn", "evaluateVisitSlot", "normalizeSkills", "isOffHours", "SLOT_TITLES", "staffingState", "personLabel"];
 
 function setUp() {
   for (const trigger of ScriptApp.getProjectTriggers()) {
-    if (trigger.getHandlerFunction() === "syncStaffing") ScriptApp.deleteTrigger(trigger);
+    if (["syncStaffing", "checkRequests"].includes(trigger.getHandlerFunction())) ScriptApp.deleteTrigger(trigger);
   }
   ScriptApp.newTrigger("syncStaffing").timeBased().everyHours(1).create();
+  ScriptApp.newTrigger("checkRequests").timeBased().everyMinutes(10).create();
   syncStaffing();
+  checkRequests();
 }
 
 function syncStaffing() {
@@ -44,6 +48,103 @@ function syncStaffing() {
   const wanted = buildStaffingEvents(rules, data, listCollection("appointments"), staff.holidays, today);
   const changes = writeCalendar(wanted, today);
   console.log(`Lab Staffing synced: ${wanted.length} slots, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
+}
+
+// --- Emailing reviewers ---
+
+const MONTH_ABBREVIATIONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function emailDate(iso) {
+  const [year, month, day] = iso.split("-").map(Number);
+  return `${MONTH_ABBREVIATIONS[month - 1]} ${day}, ${year}`;
+}
+
+function emailTime(time) {
+  const [hour, minute] = time.split(":").map(Number);
+  return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+function describeTimeOffForEmail(request) {
+  const dates = request.from === request.to ? emailDate(request.from) : `${emailDate(request.from)} – ${emailDate(request.to)}`;
+  const hours = request.start ? `, ${emailTime(request.start)} – ${emailTime(request.end)}` : "";
+  return `${dates}${hours}${request.note ? ` (${request.note})` : ""}`;
+}
+
+// Emails each reviewer who wants notifications about requests waiting for review, once per request.
+// The first run only notes what's already waiting, so turning this on doesn't send a flood of old requests.
+function checkRequests() {
+  const members = listCollection("members");
+  const nameOf = (email) => (members.find((member) => member.id === email) || {}).name || email;
+  const pending = [
+    ...listCollection("timeOff").filter((request) => request.status === "pending").map((request) => ({
+      id: `timeOff/${request.id}`,
+      owner: request.ownerEmail,
+      text: `Time off: ${describeTimeOffForEmail(request)}`,
+    })),
+    ...listCollection("changeRequests").filter((request) => request.status === "pending").map((request) => ({
+      id: `changeRequests/${request.id}`,
+      owner: request.ownerEmail,
+      text: `Schedule change: ${request.summary}`,
+    })),
+  ];
+  // Changes Grad Students/Post-Docs have already saved, which reviewers hear about but don't need to approve.
+  const notices = listCollection("notices").sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const properties = PropertiesService.getScriptProperties();
+  const saved = properties.getProperty("notifiedRequests");
+  const pendingIds = pending.map((request) => request.id);
+  if (saved === null) {
+    properties.setProperty("notifiedRequests", JSON.stringify(pendingIds));
+    for (const notice of notices) deleteDocument(`notices/${notice.id}`);
+    console.log(`Request emails turned on. ${pending.length} request(s) and ${notices.length} update(s) already there weren't emailed.`);
+    return { emailed: 0, fresh: 0 };
+  }
+
+  const notified = new Set(JSON.parse(saved));
+  const fresh = pending.filter((request) => !notified.has(request.id));
+  const reviewers = members.filter((member) => member.role === "reviewer" && member.notify !== false);
+  let emailed = 0;
+  for (const reviewer of reviewers) {
+    // Nobody is emailed about their own request or change.
+    const requests = fresh.filter((request) => request.owner !== reviewer.id);
+    const updates = notices.filter((notice) => notice.ownerEmail !== reviewer.id);
+    if (!requests.length && !updates.length) continue;
+    let subject;
+    if (requests.length === 1 && !updates.length) subject = `Lab schedule: ${nameOf(requests[0].owner)} sent a request to review`;
+    else if (updates.length === 1 && !requests.length) subject = `Lab schedule: ${nameOf(updates[0].ownerEmail)} updated their schedule`;
+    else {
+      const parts = [];
+      if (requests.length) parts.push(`${requests.length} new request${requests.length === 1 ? "" : "s"} to review`);
+      if (updates.length) parts.push(`${updates.length} schedule update${updates.length === 1 ? "" : "s"}`);
+      subject = `Lab schedule: ${parts.join(" and ")}`;
+    }
+    const lines = [`Hi ${reviewer.name},`, ""];
+    if (requests.length) {
+      lines.push(
+        requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Schedule:" : "New requests are waiting for review on the Lifespan Cognition Lab Schedule:",
+        "",
+        ...requests.map((request) => `• ${nameOf(request.owner)}: ${request.text}`),
+        "",
+        `Review them here: ${CONFIG.siteUrl}#review`,
+        "",
+      );
+    }
+    if (updates.length) {
+      lines.push(
+        "Grad Students/Post-Docs saved these changes (no review needed):",
+        "",
+        ...updates.map((notice) => `• ${nameOf(notice.ownerEmail)}: ${notice.summary}`),
+        "",
+      );
+    }
+    lines.push('To stop these emails, untick "Email me when requests need review" under Lab Management → My information.');
+    MailApp.sendEmail({ to: reviewer.id, subject, body: lines.join("\n") });
+    emailed++;
+  }
+  // Only requests still waiting are remembered, so this list stays small. Notices are done with once emailed.
+  properties.setProperty("notifiedRequests", JSON.stringify(pendingIds));
+  for (const notice of notices) deleteDocument(`notices/${notice.id}`);
+  if (fresh.length || notices.length) console.log(`${fresh.length} new request(s) and ${notices.length} update(s); emailed ${emailed} reviewer(s).`);
+  return { emailed, fresh: fresh.length };
 }
 
 // --- Reading the website and the database ---
@@ -105,6 +206,17 @@ function listCollection(name) {
     pageToken = page.nextPageToken || "";
   } while (pageToken);
   return documents;
+}
+
+function deleteDocument(path) {
+  const response = UrlFetchApp.fetch(`https://firestore.googleapis.com/v1/projects/${CONFIG.projectId}/databases/(default)/documents/${path}`, {
+    method: "delete",
+    muteHttpExceptions: true,
+    headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}`, "X-Goog-User-Project": CONFIG.projectId },
+  });
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`Couldn't delete ${path} from Firebase (HTTP ${response.getResponseCode()}): ${response.getContentText().slice(0, 300)}`);
+  }
 }
 
 // --- Working out the events ---
@@ -189,7 +301,7 @@ function eventResource(item, signature) {
     description: item.description,
     start: { dateTime: item.start.toISOString(), timeZone: CONFIG.timeZone },
     end: { dateTime: item.end.toISOString(), timeZone: CONFIG.timeZone },
-    colorId: item.color,
+    ...(item.color ? { colorId: item.color } : {}),
     extendedProperties: { private: { labKey: item.key, labSignature: signature } },
   };
 }
