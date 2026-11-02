@@ -1780,22 +1780,36 @@ function setShownMembers(emails) {
   renderMemberList();
 }
 
+function pickerSummaryText(total) {
+  return shownMembers.size
+    ? `Showing ${shownMembers.size} of ${total} lab member${total === 1 ? "" : "s"}`
+    : "Choose lab members to show";
+}
+
 // Lab members starts empty; reviewers tick the people they want to see in this checkbox drop-down.
+// Ticking updates the drop-down in place rather than rebuilding it, so the page doesn't jump.
 function renderMemberPicker(others) {
   const details = el("details", "multi-select");
   details.open = memberPickerOpen;
   details.addEventListener("toggle", () => {
     memberPickerOpen = details.open;
   });
-  const summary = el("summary", "", shownMembers.size
-    ? `Showing ${shownMembers.size} of ${others.length} lab member${others.length === 1 ? "" : "s"}`
-    : "Choose lab members to show");
+  const summary = el("summary", "", pickerSummaryText(others.length));
+  const boxes = [];
+  const showChosen = () => {
+    for (const box of boxes) box.checked = shownMembers.has(box.value);
+    summary.textContent = pickerSummaryText(others.length);
+    renderShownMembers(others);
+  };
   const panel = el("div", "multi-select-panel");
   const quick = el("div", "multi-select-actions");
   const quickButton = (text, emails) => {
     const button = el("button", "link-button", text);
     button.type = "button";
-    button.addEventListener("click", () => setShownMembers(emails));
+    button.addEventListener("click", () => {
+      shownMembers = new Set(emails);
+      showChosen();
+    });
     return button;
   };
   quick.append(quickButton("Show everyone", others.map((member) => member.email)), quickButton("Clear", []));
@@ -1807,11 +1821,11 @@ function renderMemberPicker(others) {
     box.value = member.email;
     box.checked = shownMembers.has(member.email);
     box.addEventListener("change", () => {
-      const next = new Set(shownMembers);
-      if (box.checked) next.add(member.email);
-      else next.delete(member.email);
-      setShownMembers([...next]);
+      if (box.checked) shownMembers.add(member.email);
+      else shownMembers.delete(member.email);
+      showChosen();
     });
+    boxes.push(box);
     option.append(box, personHeader(member));
     panel.append(option);
   }
@@ -1819,21 +1833,33 @@ function renderMemberPicker(others) {
   return details;
 }
 
+function renderShownMembers(others) {
+  const shown = others.filter((member) => shownMembers.has(member.email));
+  document.getElementById("member-list").replaceChildren(...(shown.length
+    ? shown.map(memberRow)
+    : [el("p", "muted", "Choose people above to see and edit their training.")]));
+}
+
+// Clicking anywhere outside the open drop-down, or pressing Escape, closes it.
+function closeMemberPicker(event) {
+  const details = document.getElementById("member-picker").firstChild;
+  if (!details || !details.open) return;
+  if (event.type === "keydown" ? event.key !== "Escape" : details.contains(event.target)) return;
+  details.open = false;
+  memberPickerOpen = false;
+}
+
 function renderMemberList() {
   if (!isReviewer()) return;
   const others = otherMembers();
   shownMembers = new Set([...shownMembers].filter((email) => others.some((member) => member.email === email)));
   const picker = document.getElementById("member-picker");
-  const list = document.getElementById("member-list");
   if (!others.length) {
     picker.replaceChildren();
-    list.replaceChildren(el("p", "muted", "No one else has been added yet. Add people below."));
+    document.getElementById("member-list").replaceChildren(el("p", "muted", "No one else has been added yet. Add people below."));
   } else {
     picker.replaceChildren(renderMemberPicker(others));
-    const shown = others.filter((member) => shownMembers.has(member.email));
-    list.replaceChildren(...(shown.length
-      ? shown.map(memberRow)
-      : [el("p", "muted", "Choose people above to see and edit their training.")]));
+    renderShownMembers(others);
   }
   const self = members.find((member) => member.email === me.email);
   document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self), notifySwitch(self)] : []));
@@ -2116,6 +2142,8 @@ function wireUpEvents() {
     button.addEventListener("click", () => showManageTab(button.dataset.manage));
   }
   document.getElementById("dialog-close").addEventListener("click", () => dialogEl.close());
+  document.addEventListener("click", closeMemberPicker);
+  document.addEventListener("keydown", closeMemberPicker);
   // Closing a dialog redraws the week, so a block dragged but not saved goes back where it was.
   dialogEl.addEventListener("close", () => {
     if (me) renderWeek();
