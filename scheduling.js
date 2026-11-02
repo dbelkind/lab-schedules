@@ -60,26 +60,128 @@ function withSkill(people, skill) {
   return people.filter((person) => person.skills.includes(skill));
 }
 
-// Wet Lab and Dry Lab need two different people; Phlebotomy can be done by either of them or someone else.
-function evaluateLab(people) {
-  const wet = withSkill(people, "Wet Lab");
-  const dry = withSkill(people, "Dry Lab");
-  const phlebotomy = withSkill(people, "Phlebotomy");
+const PHLEBOTOMY_MINUTES = 30;
+const WET_LAB_MINUTES = 120;
+const MAX_GAP_MINUTES = 30;
+const TIMING_STEP_MINUTES = 5;
+
+function clockTime(minutes) {
+  const hour = Math.floor(minutes / 60);
+  return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, "0")} ${hour < 12 || hour === 24 ? "AM" : "PM"}`;
+}
+
+// People without an isFree check (as in simple tests) count as free all day.
+function freeBetween(person, from, to) {
+  return person.isFree ? person.isFree(from, to) : true;
+}
+
+// The stretches of [from, to] someone is free, such as "9:30 AM–10:30 AM".
+function freeStretches(person, from, to) {
+  const stretches = [];
+  let runStart = null;
+  for (let minute = from; minute < to; minute += TIMING_STEP_MINUTES) {
+    const free = freeBetween(person, minute, minute + TIMING_STEP_MINUTES);
+    if (free && runStart === null) runStart = minute;
+    if (!free && runStart !== null) {
+      stretches.push([runStart, minute]);
+      runStart = null;
+    }
+  }
+  if (runStart !== null) stretches.push([runStart, to]);
+  return stretches.map(([start, end]) => `${clockTime(start)}–${clockTime(end)}`);
+}
+
+// Wet Lab takes 2 hours and has to start no more than 30 minutes after phlebotomy ends. It may run past the slot.
+function wetLabStarts(person, phlebotomyAt) {
+  const starts = [];
+  const earliest = phlebotomyAt + PHLEBOTOMY_MINUTES;
+  for (let start = earliest; start <= earliest + MAX_GAP_MINUTES; start += TIMING_STEP_MINUTES) {
+    if (freeBetween(person, start, start + WET_LAB_MINUTES)) starts.push(start);
+  }
+  return starts;
+}
+
+// Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab follows
+// phlebotomy as above, and must be a different person from Dry Lab. A slot is "tight" when it only works with a
+// particular timing, rather than phlebotomy at the start and Wet Lab straight after.
+function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
+  const slotStart = timeToMinutes(slot.start);
+  const slotEnd = timeToMinutes(slot.end);
+  const dry = withSkill(people, "Dry Lab").filter((person) => freeBetween(person, slotStart, slotEnd));
+  const phlebotomists = withSkill(people, "Phlebotomy");
+  const wetLabbers = withSkill(people, "Wet Lab");
+
+  const options = [];
+  for (let at = slotStart; at + PHLEBOTOMY_MINUTES <= slotEnd; at += TIMING_STEP_MINUTES) {
+    options.push({
+      at,
+      phlebotomy: phlebotomists.filter((person) => freeBetween(person, at, at + PHLEBOTOMY_MINUTES)),
+      wet: wetLabbers.flatMap((person) => wetLabStarts(person, at).map((start) => ({ person, start }))),
+    });
+  }
+  const phlebotomy = phlebotomists.filter((person) => options.some((option) => option.phlebotomy.includes(person)));
+  const wet = wetLabbers.filter((person) => options.some((option) => option.wet.some((choice) => choice.person === person)));
+
+  const plans = [];
+  for (const option of options) {
+    if (!option.phlebotomy.length) continue;
+    const choice = option.wet.find((candidate) => dry.some((dryPerson) => dryPerson !== candidate.person));
+    if (choice) plans.push({ phlebotomyAt: option.at, wetStart: choice.start });
+  }
+
   const problems = [];
   if (!wet.length) problems.push("No one available for Wet Lab");
   if (!dry.length) problems.push("No one available for Dry Lab");
   if (!phlebotomy.length) problems.push("No one available for Phlebotomy");
-  if (wet.length && dry.length && !wet.some((wetPerson) => dry.some((dryPerson) => dryPerson !== wetPerson))) {
-    problems.push(`Wet Lab and Dry Lab need two different people, but only ${wet[0].name} is available for them`);
+  if (!problems.length && !plans.length) {
+    const timingWorks = options.some((option) => option.phlebotomy.length && option.wet.length);
+    problems.push(timingWorks
+      ? `Wet Lab and Dry Lab need two different people, but only ${wet[0].name} is available for them`
+      : "Phlebotomy and Wet Lab can't be lined up: Wet Lab needs 2 hours, starting within 30 minutes after phlebotomy ends");
   }
+
+  const standard = plans.find((plan) => plan.phlebotomyAt === slotStart && plan.wetStart === slotStart + PHLEBOTOMY_MINUTES);
+  const tight = !problems.length && !standard;
+  const plan = problems.length ? null : standard || plans[0];
+
+  // Anyone who can only help at certain times is marked, with the details listed under the names.
+  const notes = [];
+  const markPhlebotomy = phlebotomy.map((person) => {
+    if (freeBetween(person, slotStart, slotEnd)) return person;
+    notes.push(`${person.name} (Phlebotomy): free ${freeStretches(person, slotStart, slotEnd).join(", ")}`);
+    return { ...person, limited: true };
+  });
+  const markWet = wet.map((person) => {
+    if (wetLabStarts(person, slotStart).includes(slotStart + PHLEBOTOMY_MINUTES)) return person;
+    const starts = [...new Set(options.flatMap((option) => option.wet.filter((choice) => choice.person === person).map((choice) => choice.start)))].sort((a, b) => a - b);
+    const range = starts[0] === starts[starts.length - 1] ? `at ${clockTime(starts[0])}` : `between ${clockTime(starts[0])} and ${clockTime(starts[starts.length - 1])}`;
+    notes.push(`${person.name} (Wet Lab): can only start ${range}`);
+    return { ...person, limited: true };
+  });
+
   return {
     groups: [
-      { label: "Wet Lab", people: wet },
+      { label: "Wet Lab", people: markWet },
       { label: "Dry Lab", people: dry },
-      { label: "Phlebotomy", people: phlebotomy },
+      { label: "Phlebotomy", people: markPhlebotomy },
     ],
     problems,
+    tight,
+    timing: plan && tight
+      ? `Works if phlebotomy is at ${clockTime(plan.phlebotomyAt)} and Wet Lab runs ${clockTime(plan.wetStart)}–${clockTime(plan.wetStart + WET_LAB_MINUTES)}`
+      : "",
+    notes,
   };
+}
+
+// For showing a result: "problem", "tight" or "ready", and names with an asterisk when someone is only free part of the time.
+function staffingState(result) {
+  if (result.problems.length) return "problem";
+  return result.tight ? "tight" : "ready";
+}
+
+function personLabel(person) {
+  return person.limited ? `${person.name}*` : person.name;
 }
 
 // Two scanners are needed. Auxiliary support only counts alongside someone with Level 2 Scanning,
@@ -161,7 +263,18 @@ function peopleAvailable(iso, start, end, data) {
 }
 
 function evaluateVisitSlot(iso, slot, kind, data) {
+  if (kind === "lab") {
+    // Lab roles don't all need the whole slot, so each person's free time is checked as the timing is worked out.
+    const candidates = data.members
+      .filter((member) => (member.skills || []).length)
+      .map((member) => ({
+        name: member.name,
+        email: member.email,
+        skills: member.skills,
+        isFree: (from, to) => !isBusyDuring(member.email, iso, from, to, data),
+      }));
+    return evaluateLab(candidates, slot);
+  }
   const people = peopleAvailable(iso, slot.start, slot.end, data);
-  if (kind === "lab") return evaluateLab(people);
   return evaluateScan(people, { offHours: isOffHours(iso, slot.start, slot.end), wandingRequired: slot.wandingRequired !== false });
 }

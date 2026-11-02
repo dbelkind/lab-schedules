@@ -44,6 +44,17 @@ service cloud.firestore {
         && (!('start' in data) || (data.start is string && data.end is string && data.start < data.end && data.from == data.to))
         && shortNote(data);
     }
+    // A reviewer entering time off for a lab member saves it already approved, signed with their own email.
+    function validEnteredByReviewer(data) {
+      return data.keys().hasAll(['ownerEmail', 'from', 'to', 'status', 'reviewedBy', 'reviewedAt'])
+        && data.keys().hasOnly(['ownerEmail', 'from', 'to', 'start', 'end', 'note', 'status', 'reviewedBy', 'reviewedAt'])
+        && data.ownerEmail is string
+        && data.status == 'approved'
+        && data.reviewedBy == email()
+        && data.from is string && data.to is string && data.from <= data.to
+        && (!('start' in data) || (data.start is string && data.end is string && data.start < data.end && data.from == data.to))
+        && shortNote(data);
+    }
     function validDecision() {
       let data = request.resource.data;
       return data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewNote', 'reviewedBy', 'reviewedAt'])
@@ -99,10 +110,12 @@ service cloud.firestore {
 
     match /timeOff/{id} {
       allow read: if owns(resource.data) || isReviewer();
-      allow create: if owns(request.resource.data) && validRequest(request.resource.data);
-      // Replacing a request drops its old decision, so an edit always goes back for review.
+      allow create: if (owns(request.resource.data) && validRequest(request.resource.data))
+        || (isReviewer() && validEnteredByReviewer(request.resource.data));
+      // Replacing a request drops its old decision, so a member's edit always goes back for review.
       allow update: if (owns(resource.data) && owns(request.resource.data) && validRequest(request.resource.data))
-        || (isReviewer() && validDecision());
+        || (isReviewer() && validDecision())
+        || (isReviewer() && validEnteredByReviewer(request.resource.data));
       allow delete: if owns(resource.data) || isReviewer();
     }
   }

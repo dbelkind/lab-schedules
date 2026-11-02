@@ -3,15 +3,23 @@
 //
 // The staffing rules aren't copied here. They're loaded from the published site's scheduling.js on every run,
 // so the calendar always matches what the website shows.
+//
+// Calendar access uses Google's "calendars created by this app" permission, so the script can only see and change
+// the Lab Staffing calendar it makes, never your other calendars.
 
 const CONFIG = {
   projectId: "lab-schedules",
   siteUrl: "https://dbelkind.github.io/lab-schedules/",
   calendarName: "Lab Staffing",
   daysAhead: 60,
+  timeZone: "America/Los_Angeles",
 };
 
-const RULE_NAMES = ["appointmentsOn", "evaluateVisitSlot", "normalizeSkills", "isOffHours", "SLOT_TITLES"];
+// Google Calendar's event colors: 10 is green (Basil), 6 is orange (Tangerine) and 11 is red (Tomato).
+const COLORS_BY_STATE = { ready: "10", tight: "6", problem: "11" };
+const TITLE_MARKS = { ready: ["✅", ""], tight: ["🟠", " (tight timing)"], problem: ["⚠️", " (can't fully staff)"] };
+
+const RULE_NAMES = ["appointmentsOn", "evaluateVisitSlot", "normalizeSkills", "isOffHours", "SLOT_TITLES", "staffingState", "personLabel"];
 
 function setUp() {
   for (const trigger of ScriptApp.getProjectTriggers()) {
@@ -121,12 +129,15 @@ function buildStaffingEvents(rules, data, appointments, holidays, today) {
         const slot = appointment[kind];
         if (!slot) continue;
         const result = rules.evaluateVisitSlot(iso, slot, kind, data);
-        const ready = !result.problems.length;
-        const lines = ready ? ["Ready to staff.", ""] : ["Can't be fully staffed:", ...result.problems.map((problem) => `• ${problem}`), ""];
+        const state = rules.staffingState(result);
+        const lines = state === "problem"
+          ? ["Can't be fully staffed:", ...result.problems.map((problem) => `• ${problem}`), ""]
+          : state === "tight" ? [`Tight timing: ${result.timing}.`, ""] : ["Ready to staff.", ""];
         for (const group of result.groups) {
           const label = group.label.endsWith("Available") ? group.label : `${group.label} Available`;
-          lines.push(`${label}: ${group.people.map((person) => person.name).join(", ") || "No one"}`);
+          lines.push(`${label}: ${group.people.map(rules.personLabel).join(", ") || "No one"}`);
         }
+        if ((result.notes || []).length) lines.push("", ...result.notes.map((note) => `*${note}`));
         if (kind === "scan" && slot.wandingRequired === false) lines.push("", "Wanding/taping isn't required for this visit.");
         if (kind === "scan" && rules.isOffHours(iso, slot.start, slot.end)) {
           lines.push("", "Outside regular hours, so someone with Level 2 Scanning is required.");
@@ -134,11 +145,11 @@ function buildStaffingEvents(rules, data, appointments, holidays, today) {
         lines.push("", `Change visits at ${CONFIG.siteUrl}`);
         events.push({
           key: `${appointment.id || `default-${iso}`}:${kind}`,
-          title: `${ready ? "✅" : "⚠️"} ${rules.SLOT_TITLES[kind]}${ready ? "" : " (can't fully staff)"}`,
+          title: `${TITLE_MARKS[state][0]} ${rules.SLOT_TITLES[kind]}${TITLE_MARKS[state][1]}`,
           description: lines.join("\n"),
           start: dateAt(iso, slot.start),
           end: dateAt(iso, slot.end),
-          color: ready ? CalendarApp.EventColor.GREEN : CalendarApp.EventColor.RED,
+          color: COLORS_BY_STATE[state],
         });
       }
     }
@@ -148,16 +159,23 @@ function buildStaffingEvents(rules, data, appointments, holidays, today) {
 
 // --- Writing the calendar ---
 
-function staffingCalendar() {
+function staffingCalendarId() {
   const properties = PropertiesService.getScriptProperties();
   const savedId = properties.getProperty("calendarId");
-  const existing = savedId && CalendarApp.getCalendarById(savedId);
-  if (existing) return existing;
-  const calendar = CalendarApp.createCalendar(CONFIG.calendarName, {
-    summary: "Who's available for participant visits. Filled in automatically every hour from the Lifespan Cognition Lab Schedule.",
+  if (savedId) {
+    try {
+      return Calendar.Calendars.get(savedId).id;
+    } catch (error) {
+      // The calendar was deleted, so make a new one below.
+    }
+  }
+  const calendar = Calendar.Calendars.insert({
+    summary: CONFIG.calendarName,
+    description: "Who's available for participant visits. Filled in automatically every hour from the Lifespan Cognition Lab Schedule.",
+    timeZone: CONFIG.timeZone,
   });
-  properties.setProperty("calendarId", calendar.getId());
-  return calendar;
+  properties.setProperty("calendarId", calendar.id);
+  return calendar.id;
 }
 
 function signatureOf(event) {
@@ -165,22 +183,50 @@ function signatureOf(event) {
   return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8));
 }
 
+function eventResource(item, signature) {
+  return {
+    summary: item.title,
+    description: item.description,
+    start: { dateTime: item.start.toISOString(), timeZone: CONFIG.timeZone },
+    end: { dateTime: item.end.toISOString(), timeZone: CONFIG.timeZone },
+    colorId: item.color,
+    extendedProperties: { private: { labKey: item.key, labSignature: signature } },
+  };
+}
+
+function listEvents(calendarId, timeMin, timeMax) {
+  const events = [];
+  let pageToken;
+  do {
+    const page = Calendar.Events.list(calendarId, {
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
+      singleEvents: true,
+      maxResults: 2500,
+      ...(pageToken ? { pageToken } : {}),
+    });
+    events.push(...(page.items || []));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return events;
+}
+
 // Only events whose staffing actually changed are rewritten, so hourly runs stay well inside Google's limits.
 function writeCalendar(wanted, today) {
-  const calendar = staffingCalendar();
+  const calendarId = staffingCalendarId();
   const windowStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const windowEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate() + CONFIG.daysAhead);
   const existing = new Map();
   const changes = { created: 0, updated: 0, deleted: 0 };
 
-  for (const event of calendar.getEvents(windowStart, windowEnd)) {
-    const key = event.getTag("labKey");
-    if (!key) continue;
-    if (existing.has(key)) {
-      event.deleteEvent();
+  for (const event of listEvents(calendarId, windowStart, windowEnd)) {
+    const tags = (event.extendedProperties && event.extendedProperties.private) || {};
+    if (!tags.labKey) continue;
+    if (existing.has(tags.labKey)) {
+      Calendar.Events.remove(calendarId, event.id);
       changes.deleted++;
     } else {
-      existing.set(key, event);
+      existing.set(tags.labKey, { id: event.id, signature: tags.labSignature });
     }
   }
 
@@ -188,26 +234,19 @@ function writeCalendar(wanted, today) {
     const signature = signatureOf(item);
     const event = existing.get(item.key);
     existing.delete(item.key);
-    if (event && event.getTag("labSignature") === signature) continue;
+    if (event && event.signature === signature) continue;
     if (event) {
-      event.setTitle(item.title);
-      event.setTime(item.start, item.end);
-      event.setDescription(item.description);
-      event.setColor(item.color);
-      event.setTag("labSignature", signature);
+      Calendar.Events.update(eventResource(item, signature), calendarId, event.id);
       changes.updated++;
     } else {
-      const created = calendar.createEvent(item.title, item.start, item.end, { description: item.description });
-      created.setColor(item.color);
-      created.setTag("labKey", item.key);
-      created.setTag("labSignature", signature);
+      Calendar.Events.insert(eventResource(item, signature), calendarId);
       changes.created++;
     }
   }
 
   // Anything left over is a visit that was cancelled or no longer exists.
   for (const event of existing.values()) {
-    event.deleteEvent();
+    Calendar.Events.remove(calendarId, event.id);
     changes.deleted++;
   }
   return changes;

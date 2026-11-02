@@ -52,6 +52,9 @@ let me = null;
 let availability = [];
 let timeOff = [];
 let editing = null;
+let actingFor = null;
+let shownMembers = new Set();
+let memberPickerOpen = false;
 let changeRequests = [];
 let appointments = [];
 let staffHolidays = [];
@@ -156,6 +159,19 @@ function partDayTimeOffOn(iso) {
 
 function isReviewer() {
   return me && me.role === "reviewer";
+}
+
+// Reviewers can enter times for any lab member; everyone else always works on their own.
+function targetEmail() {
+  return isReviewer() && actingFor ? actingFor : me.email;
+}
+
+function enteringForOther() {
+  return targetEmail() !== me.email;
+}
+
+function canEditEntriesOf(email) {
+  return email === me.email || isReviewer();
 }
 
 function renderFilters() {
@@ -326,7 +342,7 @@ function renderUnavailabilityColumn(column, date, colorOf) {
     makeInteractive(entry, {
       start: block.start,
       end: block.end,
-      draggable: !block.ghost && block.ownerEmail === me.email,
+      draggable: !block.ghost && canEditEntriesOf(block.ownerEmail),
       onOpen: () => (block.ghost ? openRequestDialog(block.requestId) : openEntryDialog(block)),
       onCommit: (start, end) => openEntryDialog(block, { start, end }),
     });
@@ -370,18 +386,22 @@ function renderLabColumn(column, iso) {
     })));
   for (const { block: item, lane, laneCount } of layoutDay(items)) {
     const result = evaluateSlot(iso, item.appointment, item.kind);
-    const node = el("div", `slot ${result.problems.length ? "slot-problem" : "slot-ready"}`);
+    const state = staffingState(result);
+    const node = el("div", `slot slot-${state}`);
     placeBlock(node, item.start, item.end, lane, laneCount);
     node.append(el("strong", "", SLOT_TITLES[item.kind]), el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`));
-    if (result.problems.length) {
+    if (state === "problem") {
       for (const problem of result.problems) node.append(el("div", "slot-issue", problem));
+    } else if (state === "tight") {
+      node.append(el("div", "slot-tight", "Tight timing"));
     } else {
       node.append(el("div", "slot-ok", "Ready to staff"));
     }
     for (const group of result.groups) {
-      const names = group.people.map((person) => person.name).join(", ") || "none";
+      const names = group.people.map(personLabel).join(", ") || "none";
       node.append(el("div", "slot-group", `${shortGroupLabel(group.label)}: ${names}`));
     }
+    for (const note of result.notes || []) node.append(el("div", "slot-note", `*${note}`));
     makeInteractive(node, {
       start: item.start,
       end: item.end,
@@ -642,7 +662,7 @@ function daysPicker(selectedDays) {
 function openEntryDialog(block, proposed) {
   const entry = availability.find((item) => item.id === block.id) || block;
   const kindLabel = entry.type === "class" ? "Class" : "Standing conflict";
-  if (entry.ownerEmail !== me.email) {
+  if (!canEditEntriesOf(entry.ownerEmail)) {
     openDialog(`${block.member}: ${kindLabel.toLowerCase()}`, [el("p", "", describeEntry(entry))], [closeButton()]);
     return;
   }
@@ -655,7 +675,8 @@ function openEntryDialog(block, proposed) {
   if (!isReviewer()) {
     body.push(el("p", "muted", "Changes go to a reviewer. Your current times stay in place until the change is approved."));
   }
-  openDialog(`Edit ${kindLabel.toLowerCase()}`, body, [
+  const title = entry.ownerEmail === me.email ? `Edit ${kindLabel.toLowerCase()}` : `Edit ${nameFor(entry.ownerEmail)}'s ${kindLabel.toLowerCase()}`;
+  openDialog(title, body, [
     dialogButton(isReviewer() ? "Save" : "Send for review", "primary", async () => {
       const updated = { ...withoutId(entry), days: days.read(), ...times.read() };
       checkRows([updated]);
@@ -668,7 +689,10 @@ function openEntryDialog(block, proposed) {
       await refresh();
       return message;
     }),
-    dialogButton("Edit all details", "secondary", async () => startEditing("availability", entry)),
+    dialogButton("Edit all details", "secondary", async () => {
+      if (isReviewer()) setActingFor(entry.ownerEmail);
+      startEditing("availability", entry);
+    }),
     closeButton(),
   ]);
 }
@@ -759,15 +783,19 @@ function openTimeOffDialog(block) {
   const body = [el("p", "", `${block.member}: ${describeTimeOff(request)}`), el("div", `status-badge status-${request.status}`, STATUS_LABELS[request.status])];
   if (request.reviewNote) body.push(el("p", "muted", `Reviewer's note: ${request.reviewNote}`));
   const actions = [];
-  if (request.ownerEmail === me.email) {
-    actions.push(dialogButton("Edit request", "secondary", async () => startEditing("timeOff", request)));
+  if (canEditEntriesOf(request.ownerEmail)) {
+    if (isReviewer() && request.status === "pending" && request.ownerEmail !== me.email) {
+      actions.push(dialogButton("Review requests", "primary", async () => openReviewTab()));
+    }
+    actions.push(dialogButton(request.ownerEmail === me.email ? "Edit request" : "Edit", "secondary", async () => {
+      if (isReviewer()) setActingFor(request.ownerEmail);
+      startEditing("timeOff", request);
+    }));
     actions.push(dialogButton(request.status === "approved" ? "Cancel time off" : "Cancel request", "secondary danger", async () => {
       await Store.deleteTimeOff(request.id);
       await refresh();
       return "Time off cancelled.";
     }));
-  } else if (isReviewer() && request.status === "pending") {
-    actions.push(dialogButton("Review requests", "primary", async () => openReviewTab()));
   }
   actions.push(closeButton());
   openDialog("Time off", body, actions);
@@ -850,21 +878,34 @@ function openSlotDialog(iso, appointment, kind) {
       body.push(el("p", "notice", "This scan is outside regular hours (weekdays 8 AM–5 PM), so someone with Level 2 Scanning is required."));
     }
   }
-  if (result.problems.length) {
+  const state = staffingState(result);
+  if (state === "problem") {
     const issues = el("div", "slot-issues");
     issues.append(el("strong", "", "Can't be fully staffed:"));
     for (const problem of result.problems) issues.append(el("div", "", problem));
     body.push(issues);
+  } else if (state === "tight") {
+    const tight = el("div", "slot-tight-box");
+    tight.append(el("strong", "", "Tight timing: "), result.timing);
+    body.push(tight);
   } else {
     body.push(el("p", "slot-ok", "Ready to staff: every requirement can be met."));
   }
   for (const group of result.groups) {
     const section = el("div", "staff-group");
     section.append(el("h3", "", `${group.label}${group.label.endsWith("Available") ? "" : " Available"}:`));
-    section.append(el("p", group.people.length ? "" : "muted", group.people.map((person) => person.name).join(", ") || "No one"));
+    section.append(el("p", group.people.length ? "" : "muted", group.people.map(personLabel).join(", ") || "No one"));
     body.push(section);
   }
-  if (kind === "lab") body.push(el("p", "muted", "Wet Lab and Dry Lab must be done by different people."));
+  if ((result.notes || []).length) {
+    const notes = el("div", "staff-notes");
+    notes.append(el("h3", "", "Limited availability:"));
+    for (const note of result.notes) notes.append(el("p", "", `*${note}`));
+    body.push(notes);
+  }
+  if (kind === "lab") {
+    body.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people."));
+  }
 
   const other = kind === "lab" ? "scan" : "lab";
   const actions = [
@@ -924,7 +965,7 @@ function setCalendarView(view) {
     ? "Participant visit staffing"
     : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
   document.getElementById("calendar-hint").textContent = lab
-    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
+    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
     : "Each block is a time someone can't be in the lab. Open time is when they're available. Click your own blocks to change them, or drag on empty space to add a time.";
   setCalendarStatus("");
   renderFilters();
@@ -973,6 +1014,7 @@ function render() {
   renderWeek();
   renderMiniMonth();
   renderSemesterOptions();
+  renderActingFor();
   renderMyEntries();
   renderReviewList();
   renderMemberList();
@@ -1260,6 +1302,13 @@ function timeOffDoc(ownerEmail, { from, to, note, start, end }) {
   return { ownerEmail, from, to, status: "pending", ...(start ? { start, end } : {}), ...(note ? { note } : {}) };
 }
 
+// Time off a reviewer enters for someone else counts as approved as soon as it's saved.
+function timeOffFor(ownerEmail, form) {
+  const doc = timeOffDoc(ownerEmail, form);
+  if (ownerEmail === me.email) return doc;
+  return { ...doc, status: "approved", reviewedBy: me.email, reviewedAt: dateToIso(new Date()) };
+}
+
 function describeEntry(block) {
   const dates = block.to ? `${formatIso(block.from)} – ${formatIso(block.to)}` : `from ${formatIso(block.from)}, no end date`;
   const label = block.type === "class" ? "Unavailable for class" : `Unavailable, standing conflict${block.note ? ` (${block.note})` : ""}`;
@@ -1311,9 +1360,11 @@ function startEditing(collection, entry) {
 function updateEditingBanner() {
   document.getElementById("editing-banner").hidden = !editing;
   document.getElementById("mode-fieldset").hidden = Boolean(editing);
-  document.getElementById("editing-text").textContent = editing && editing.collection === "timeOff"
+  document.getElementById("editing-text").textContent = editing && editing.collection === "timeOff" && !enteringForOther()
     ? "You're editing a request. Saving sends it back for review, and it won't count as approved until it's reviewed again."
-    : isReviewer()
+    : enteringForOther()
+      ? `You're editing ${nameFor(targetEmail())}'s saved entry. Changes save straight away.`
+      : isReviewer()
       ? "You're editing a saved entry."
       : "You're editing a saved entry. Saving sends the change to a reviewer, and your current times stay in place until it's approved.";
 }
@@ -1332,6 +1383,25 @@ function actionButton(text, action) {
     }
   });
   return button;
+}
+
+function personHeader(person) {
+  const header = el("div", "person");
+  const initials = person.name.split(/\s+/).filter(Boolean).map((word) => word[0]).join("").slice(0, 2).toUpperCase();
+  const avatar = el("span", "avatar", initials || "?");
+  if (person.color) avatar.style.setProperty("--member", person.color);
+  avatar.setAttribute("aria-hidden", "true");
+  const name = el("div", "person-name", person.name);
+  if (person.role === "reviewer") name.append(el("span", "role-badge", "Reviewer"));
+  if (me && person.email === me.email) name.append(el("span", "role-badge you", "You"));
+  const text = el("div", "person-text");
+  text.append(name, el("div", "person-email", person.email));
+  header.append(avatar, text);
+  return header;
+}
+
+function personFor(email) {
+  return members.find((member) => member.email === email) || { name: email, email };
 }
 
 function entryRow(text, ...buttons) {
@@ -1365,9 +1435,10 @@ async function proposeChange(plan, summary) {
 function renderMyEntries() {
   const listEl = document.getElementById("my-entries");
   if (!me) return;
-  const mine = availability.filter((block) => block.ownerEmail === me.email);
-  const requests = timeOff.filter((request) => request.ownerEmail === me.email);
-  const changes = changeRequests.filter((request) => request.ownerEmail === me.email && request.status !== "approved");
+  const owner = targetEmail();
+  const mine = availability.filter((block) => block.ownerEmail === owner);
+  const requests = timeOff.filter((request) => request.ownerEmail === owner);
+  const changes = changeRequests.filter((request) => request.ownerEmail === owner && request.status !== "approved");
   const waiting = pendingEntryIds();
   const rows = [];
   for (const block of mine) {
@@ -1411,7 +1482,7 @@ function renderMyEntries() {
     if (request.reviewNote) row.firstChild.append(el("div", "muted", `Reviewer's note: ${request.reviewNote}`));
     rows.push(row);
   }
-  listEl.replaceChildren(...(rows.length ? rows : [el("p", "muted", "You haven't added any times you're unavailable yet.")]));
+  listEl.replaceChildren(...(rows.length ? rows : [el("p", "muted", enteringForOther() ? `No unavailable times have been added for ${nameFor(owner)} yet.` : "You haven't added any times you're unavailable yet.")]));
 }
 
 function decide(request, status, note) {
@@ -1468,7 +1539,7 @@ function renderReviewList() {
   const changeRows = pendingChanges.map((request) => {
     const noteInput = reviewNoteInput("");
     const row = entryRow(
-      `${nameFor(request.ownerEmail)}, schedule change: ${request.summary}`,
+      `Schedule change: ${request.summary}`,
       noteInput,
       actionButton("Approve", async () => {
         await Store.approveChangeRequest(request.id, checkedPlan(request), decision("approved", noteInput.value.trim()));
@@ -1482,6 +1553,8 @@ function renderReviewList() {
       }),
     );
     row.firstChild.append(el("div", "status-badge status-pending", STATUS_LABELS.pending));
+    row.firstChild.prepend(personHeader(personFor(request.ownerEmail)));
+    row.classList.add("request-row");
     return row;
   });
 
@@ -1495,8 +1568,10 @@ function renderReviewList() {
     const buttons = [];
     if (request.status !== "approved") buttons.push(decide("approved", "Approve"));
     if (request.status !== "declined") buttons.push(decide("declined", "Decline"));
-    const row = entryRow(`${nameFor(request.ownerEmail)}, time off: ${describeTimeOff(request)}`, noteInput, ...buttons);
+    const row = entryRow(`Time off: ${describeTimeOff(request)}`, noteInput, ...buttons);
     row.firstChild.append(el("div", `status-badge status-${request.status}`, STATUS_LABELS[request.status]));
+    row.firstChild.prepend(personHeader(personFor(request.ownerEmail)));
+    row.classList.add("request-row");
     return row;
   });
 
@@ -1539,7 +1614,6 @@ function skillPicker(selectedSkills, { trackChanges = false, onChange = () => {}
 
 function memberRow(member) {
   const own = member.email === me.email;
-  const label = `${member.name} (${member.email})${member.role === "reviewer" ? ", reviewer" : ""}`;
   const unsavedNote = el("span", "unsaved-note", "Unsaved changes");
   unsavedNote.hidden = true;
   const save = actionButton("Saved training", async () => {
@@ -1557,24 +1631,92 @@ function memberRow(member) {
   showChanged(false);
   const buttons = [unsavedNote, save];
   if (!own) {
+    buttons.push(actionButton("Edit schedule", async () => {
+      setActingFor(member.email);
+      showPage("update");
+      showTab("entries");
+    }));
     buttons.push(actionButton("Remove", async () => {
       await Store.deleteMember(member.email);
+      shownMembers.delete(member.email);
       await refresh();
       setStatus(`Removed ${member.name} and their schedule.`);
     }));
   }
-  const row = entryRow(label, ...buttons);
-  row.classList.add("member-row");
-  row.firstChild.append(skills.node);
+  const row = el("div", "member-card");
+  row.dataset.email = member.email;
+  const top = el("div", "member-card-top");
+  const actions = el("div", "entry-actions");
+  actions.append(...buttons);
+  top.append(personHeader(member), actions);
+  row.append(top, skills.node);
   return row;
+}
+
+function otherMembers() {
+  return members.filter((member) => member.email !== me.email).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function setShownMembers(emails) {
+  shownMembers = new Set(emails);
+  renderMemberList();
+}
+
+// Lab members starts empty; reviewers tick the people they want to see in this checkbox drop-down.
+function renderMemberPicker(others) {
+  const details = el("details", "multi-select");
+  details.open = memberPickerOpen;
+  details.addEventListener("toggle", () => {
+    memberPickerOpen = details.open;
+  });
+  const summary = el("summary", "", shownMembers.size
+    ? `Showing ${shownMembers.size} of ${others.length} lab member${others.length === 1 ? "" : "s"}`
+    : "Choose lab members to show");
+  const panel = el("div", "multi-select-panel");
+  const quick = el("div", "multi-select-actions");
+  const quickButton = (text, emails) => {
+    const button = el("button", "link-button", text);
+    button.type = "button";
+    button.addEventListener("click", () => setShownMembers(emails));
+    return button;
+  };
+  quick.append(quickButton("Show everyone", others.map((member) => member.email)), quickButton("Clear", []));
+  panel.append(quick);
+  for (const member of others) {
+    const option = el("label", "multi-option");
+    const box = el("input");
+    box.type = "checkbox";
+    box.value = member.email;
+    box.checked = shownMembers.has(member.email);
+    box.addEventListener("change", () => {
+      const next = new Set(shownMembers);
+      if (box.checked) next.add(member.email);
+      else next.delete(member.email);
+      setShownMembers([...next]);
+    });
+    option.append(box, personHeader(member));
+    panel.append(option);
+  }
+  details.append(summary, panel);
+  return details;
 }
 
 function renderMemberList() {
   if (!isReviewer()) return;
-  const others = members.filter((member) => member.email !== me.email);
-  document.getElementById("member-list").replaceChildren(...(others.length
-    ? others.map(memberRow)
-    : [el("p", "muted", "No one else has been added yet. Add people below.")]));
+  const others = otherMembers();
+  shownMembers = new Set([...shownMembers].filter((email) => others.some((member) => member.email === email)));
+  const picker = document.getElementById("member-picker");
+  const list = document.getElementById("member-list");
+  if (!others.length) {
+    picker.replaceChildren();
+    list.replaceChildren(el("p", "muted", "No one else has been added yet. Add people below."));
+  } else {
+    picker.replaceChildren(renderMemberPicker(others));
+    const shown = others.filter((member) => shownMembers.has(member.email));
+    list.replaceChildren(...(shown.length
+      ? shown.map(memberRow)
+      : [el("p", "muted", "Choose people above to see and edit their training.")]));
+  }
   const self = members.find((member) => member.email === me.email);
   document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self)] : []));
 }
@@ -1594,6 +1736,7 @@ async function addMember() {
   if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new Error("Please enter their USC email.");
   if (!name) throw new Error("Please enter their name.");
   await Store.saveMember(email, { name, role: document.getElementById("new-member-role").value, skills: newMemberSkills.read() });
+  shownMembers.add(email);
   emailEl.value = "";
   nameInput.value = "";
   renderNewMemberSkills();
@@ -1610,7 +1753,7 @@ function friendlyError(error) {
 function updateSaveVisibility() {
   const needsReview = activeTab === "class" && reviewEl.hidden;
   saveButton.hidden = needsReview || activeTab === "entries";
-  saveButton.textContent = activeTab === "ooo" ? "Send for review" : "Save";
+  saveButton.textContent = activeTab === "ooo" && !enteringForOther() ? "Send for review" : "Save";
 }
 
 function clearEditing() {
@@ -1644,33 +1787,34 @@ function resetForm() {
 
 async function saveActiveTab() {
   const editingId = editing && editing.id;
-  const mine = availability.filter((block) => block.ownerEmail === me.email);
+  const owner = targetEmail();
+  const mine = availability.filter((block) => block.ownerEmail === owner);
   const original = editingId && mine.find((block) => block.id === editingId);
   let done;
   if (activeTab === "class") {
     const form = readClassForm();
     if (editingId) {
-      const [first, ...others] = form.rows.map((row) => ({ ownerEmail: me.email, type: "class", semester: form.semester, ...row, from: form.from, to: form.to }));
+      const [first, ...others] = form.rows.map((row) => ({ ownerEmail: owner, type: "class", semester: form.semester, ...row, from: form.from, to: form.to }));
       done = await proposeChange({ creates: others, updates: [{ id: editingId, data: first }] }, `Change "${describeEntry(original)}" to "${describeEntry(first)}"`);
     } else {
-      const plan = planClassChange(mine, me.email, form);
+      const plan = planClassChange(mine, owner, form);
       const semesterName = (semesters.find((semester) => semester.id === form.semester) || {}).name || form.semester;
       done = await proposeChange(plan, `New ${semesterName} class times from ${formatIso(form.from)} to ${formatIso(form.to)}: ${form.rows.map((row) => `${row.days.join(", ")} ${formatTime(row.start)} – ${formatTime(row.end)}`).join("; ")}`);
     }
   } else if (activeTab === "conflict") {
-    const [first, ...others] = conflictDocs(me.email, readConflictForm());
+    const [first, ...others] = conflictDocs(owner, readConflictForm());
     if (editingId) {
       done = await proposeChange({ creates: others, updates: [{ id: editingId, data: first }] }, `Change "${describeEntry(original)}" to "${describeEntry(first)}"`);
     } else {
       done = await proposeChange({ creates: [first, ...others] }, "");
     }
   } else {
-    await Store.saveTimeOff(editingId, timeOffDoc(me.email, readTimeOffForm()));
-    done = "Sent for review. It will appear on the calendar once it's approved.";
+    await Store.saveTimeOff(editingId, timeOffFor(owner, readTimeOffForm()));
+    done = owner === me.email ? "Sent for review. It will appear on the calendar once it's approved." : "Saved.";
   }
   await refresh();
   resetForm();
-  setStatus(done);
+  setStatus(owner === me.email ? done : `${done} Saved for ${nameFor(owner)}.`.replace("Saved. Saved for", "Saved for"));
 }
 
 // --- Loading and signing in ---
@@ -1712,6 +1856,37 @@ async function refresh() {
   render();
 }
 
+function renderActingFor() {
+  const field = document.getElementById("acting-for-field");
+  field.hidden = !isReviewer();
+  if (!isReviewer()) return;
+  if (actingFor && !members.some((member) => member.email === actingFor)) actingFor = null;
+  const select = document.getElementById("acting-for");
+  const option = (email, text) => {
+    const node = el("option", "", text);
+    node.value = email;
+    return node;
+  };
+  const others = members.filter((member) => member.email !== me.email).sort((a, b) => a.name.localeCompare(b.name));
+  select.replaceChildren(option(me.email, `Myself (${me.name})`), ...others.map((member) => option(member.email, member.name)));
+  select.value = targetEmail();
+  const name = nameFor(targetEmail());
+  const note = document.getElementById("acting-for-note");
+  note.hidden = !enteringForOther();
+  note.textContent = enteringForOther()
+    ? `You're entering ${name}'s unavailable times. Everything you save for ${name} applies straight away, without review, and they'll see it on their calendar.`
+    : "";
+  document.querySelector('.tab[data-tab="entries"]').textContent = enteringForOther() ? `${name}'s availability` : "My availability";
+}
+
+function setActingFor(email) {
+  actingFor = email === me.email ? null : email;
+  resetForm();
+  renderActingFor();
+  renderMyEntries();
+  updateSaveVisibility();
+}
+
 function showPage(page) {
   activePage = page;
   document.getElementById("page-calendar").hidden = page !== "calendar";
@@ -1739,6 +1914,9 @@ async function handleAuthChange(user) {
   changeRequests = [];
   appointments = [];
   blocks = [];
+  actingFor = null;
+  shownMembers = new Set();
+  memberPickerOpen = false;
   hidden.clear();
   calendarView = "unavailability";
   messagesEl.replaceChildren();
@@ -1762,7 +1940,7 @@ async function handleAuthChange(user) {
     if (isReviewer()) renderNewMemberSkills();
     showScreen("app");
     await refresh();
-    setCalendarView("unavailability");
+    setCalendarView(isReviewer() ? "lab" : "unavailability");
     const hasPending = isReviewer() &&
       (timeOff.some((request) => request.status === "pending") || changeRequests.some((request) => request.status === "pending"));
     showTab("class");
@@ -1802,6 +1980,7 @@ function wireUpEvents() {
     });
   }
   semesterEl.addEventListener("change", applySemesterDates);
+  document.getElementById("acting-for").addEventListener("change", (event) => setActingFor(event.target.value));
   document.getElementById("mode-new").addEventListener("change", applySemesterDates);
   document.getElementById("mode-changed").addEventListener("change", applySemesterDates);
   document.getElementById("cancel-edit").addEventListener("click", () => {

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=11">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -19,7 +19,7 @@
       </div>
       <nav id="page-nav" class="page-nav" aria-label="Pages" hidden>
         <button type="button" class="page-link" data-page="calendar" aria-current="page">Calendar</button>
-        <button type="button" class="page-link" data-page="update">Update availability</button>
+        <button type="button" class="page-link" data-page="update">Update Availability</button>
         <button id="manage-link" type="button" class="page-link" data-page="manage" hidden>Lab Management</button>
       </nav>
       <div id="user-bar" class="user-bar" hidden>
@@ -53,7 +53,7 @@
       </div>
       <div id="view-switch" class="segmented" role="group" aria-label="Calendar view" hidden>
         <button type="button" data-view="unavailability" aria-pressed="true">Unavailability</button>
-        <button type="button" data-view="lab" aria-pressed="false">Lab events</button>
+        <button type="button" data-view="lab" aria-pressed="false">Lab Events</button>
       </div>
     </div>
 
@@ -65,7 +65,7 @@
       <span id="calendar-status" class="status calendar-status" role="status"></span>
     </div>
 
-    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update availability</button>.</p>
+    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update Availability</button>.</p>
     <div id="filters" class="filters" aria-label="Filter by lab member"></div>
 
     <div class="calendar-layout">
@@ -89,6 +89,12 @@
 
     <section id="page-update" class="upload" hidden>
       <h2>Update your availability</h2>
+      <div id="acting-for-field" class="acting-for" hidden>
+        <label class="field">Entering times for
+          <select id="acting-for"></select>
+        </label>
+        <p id="acting-for-note" class="notice" hidden></p>
+      </div>
       <p>Add the times you <strong>can't</strong> work in the lab: your classes, other regular commitments, and time off. Any time you don't add here means you may be scheduled for work in the lab. As you get scheduled, please reach out to lab manager for any other potential issues or questions.</p>
       <p class="muted">Uploaded files stay on your device and only the days and times are saved. Course names and rooms aren't. Only you and your lab's reviewers can see what you add.</p>
 
@@ -208,6 +214,7 @@
       </div>
 
       <div id="manage-members" hidden>
+        <div id="member-picker"></div>
         <div id="member-list"></div>
         <h3>Add someone</h3>
         <div class="field-row">
@@ -250,7 +257,7 @@
   <script src="firebase-config.js?v=2"></script>
   <script src="store.js?v=3"></script>
   <script src="parser.js?v=2"></script>
-  <script src="scheduling.js?v=3"></script>
-  <script src="app.js?v=10"></script>
+  <script src="scheduling.js?v=4"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
