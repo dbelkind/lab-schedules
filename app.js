@@ -410,7 +410,8 @@ function renderLabColumn(column, iso) {
     if (state === "problem") {
       for (const problem of result.problems) node.append(el("div", "slot-issue", problem));
     } else if (state === "tight") {
-      node.append(el("div", "slot-tight", "Tight timing"));
+      if (result.tight) node.append(el("div", "slot-tight", "Tight timing"));
+      if ((result.warnings || []).length) node.append(el("div", "slot-tight", "No experienced phlebotomist"));
     } else {
       node.append(el("div", "slot-ok", "Ready to staff"));
     }
@@ -921,9 +922,16 @@ function openSlotDialog(iso, appointment, kind) {
     for (const problem of result.problems) issues.append(el("div", "", problem));
     body.push(issues);
   } else if (state === "tight") {
-    const tight = el("div", "slot-tight-box");
-    tight.append(el("strong", "", "Tight timing: "), result.timing);
-    body.push(tight);
+    if (result.tight) {
+      const tight = el("div", "slot-tight-box");
+      tight.append(el("strong", "", "Tight timing: "), result.timing);
+      body.push(tight);
+    }
+    for (const warning of result.warnings || []) {
+      const box = el("div", "slot-tight-box");
+      box.append(el("strong", "", "Warning: "), warning);
+      body.push(box);
+    }
   } else {
     body.push(el("p", "slot-ok", "Ready to staff: every requirement can be met."));
   }
@@ -940,7 +948,7 @@ function openSlotDialog(iso, appointment, kind) {
     body.push(notes);
   }
   if (kind === "lab") {
-    body.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people."));
+    body.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people. Without an Experienced Phlebotomist the visit gets a warning, and with only a Training Phlebotomist it needs mobile phlebotomy booked in advance."));
   }
 
   const other = kind === "lab" ? "scan" : "lab";
@@ -1001,7 +1009,7 @@ function setCalendarView(view) {
     ? "Participant visit staffing"
     : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
   document.getElementById("calendar-hint").textContent = lab
-    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
+    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing or have no experienced phlebotomist. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
     : "Each block is a time someone can't be in the lab. Open time is when they're available. Click your own blocks to change them, or drag on empty space to add a time.";
   setCalendarStatus("");
   renderFilters();
@@ -1651,10 +1659,12 @@ function skillPicker(selectedSkills, { trackChanges = false, onChange = () => {}
     label.classList.toggle("unsaved", trackChanges && box.checked !== selectedSkills.includes(box.value));
     onChange(boxes.some((other) => other.checked !== selectedSkills.includes(other.value)));
   };
-  const addGroup = (title, skills) => {
+  // Within an exclusive group, such as the phlebotomy levels, ticking one unticks the others.
+  const addGroup = (title, skills, exclusive = false) => {
     const group = el("div", "skill-group");
     group.append(el("span", "skill-group-label", title));
     const pills = el("div", "row-days");
+    const groupBoxes = [];
     for (const skill of skills) {
       const label = el("label", "day-check");
       const box = el("input");
@@ -1663,14 +1673,25 @@ function skillPicker(selectedSkills, { trackChanges = false, onChange = () => {}
       box.checked = selectedSkills.includes(skill);
       boxes.push(box);
       if (trackChanges) label.classList.add("saved-skill");
-      box.addEventListener("change", () => markChange(box, label));
+      box.addEventListener("change", () => {
+        if (exclusive && box.checked) {
+          for (const other of groupBoxes) {
+            if (other.box === box || !other.box.checked) continue;
+            other.box.checked = false;
+            markChange(other.box, other.label);
+          }
+        }
+        markChange(box, label);
+      });
+      groupBoxes.push({ box, label });
       label.append(box, skill);
       pills.append(label);
     }
     group.append(pills);
     node.append(group);
   };
-  addGroup("Cleared for", SKILLS);
+  addGroup("Cleared for", SKILLS.filter((skill) => !PHLEBOTOMY_LEVELS.includes(skill)));
+  addGroup("Phlebotomy level", PHLEBOTOMY_LEVELS, true);
   addGroup("Also trained in", SECONDARY_SKILLS);
   return { node, read: () => boxes.filter((box) => box.checked).map((box) => box.value) };
 }

@@ -19,7 +19,7 @@ const CONFIG = {
 // Google Calendar's event colors: 10 is green (Basil), 5 is yellow (Banana) and 11 is red (Tomato).
 // Event colors look the same to everyone the calendar is shared with, unlike the calendar's own color.
 const COLORS_BY_STATE = { ready: "10", tight: "5", problem: "11" };
-const TITLE_MARKS = { ready: ["✅", ""], tight: ["🟡", " (tight timing)"], problem: ["⚠️", " (can't fully staff)"] };
+const TITLE_MARKS = { ready: ["✅", ""], tight: ["🟡", ""], problem: ["⚠️", " (can't fully staff)"] };
 
 const RULE_NAMES = ["appointmentsOn", "evaluateVisitSlot", "normalizeSkills", "isOffHours", "SLOT_TITLES", "staffingState", "personLabel"];
 
@@ -242,9 +242,15 @@ function buildStaffingEvents(rules, data, appointments, holidays, today) {
         if (!slot) continue;
         const result = rules.evaluateVisitSlot(iso, slot, kind, data);
         const state = rules.staffingState(result);
+        const warnings = result.warnings || [];
         const lines = state === "problem"
           ? ["Can't be fully staffed:", ...result.problems.map((problem) => `• ${problem}`), ""]
-          : state === "tight" ? [`Tight timing: ${result.timing}.`, ""] : ["Ready to staff.", ""];
+          : state === "tight"
+            ? [...(result.tight ? [`Tight timing: ${result.timing}.`] : []), ...warnings.map((warning) => `Warning: ${warning}.`), ""]
+            : ["Ready to staff.", ""];
+        // Amber slots say why: tight timing, no experienced phlebotomist, or both.
+        const amberReasons = [result.tight && "tight timing", warnings.length && "no experienced phlebotomist"].filter(Boolean);
+        const flag = state === "tight" ? ` (${amberReasons.join(", ")})` : TITLE_MARKS[state][1];
         for (const group of result.groups) {
           const label = group.label.endsWith("Available") ? group.label : `${group.label} Available`;
           lines.push(`${label}: ${group.people.map(rules.personLabel).join(", ") || "No one"}`);
@@ -257,7 +263,7 @@ function buildStaffingEvents(rules, data, appointments, holidays, today) {
         lines.push("", `Change visits at ${CONFIG.siteUrl}`);
         events.push({
           key: `${appointment.id || `default-${iso}`}:${kind}`,
-          title: `${TITLE_MARKS[state][0]} ${rules.SLOT_TITLES[kind]}${TITLE_MARKS[state][1]}`,
+          title: `${TITLE_MARKS[state][0]} ${rules.SLOT_TITLES[kind]}${flag}`,
           description: lines.join("\n"),
           start: dateAt(iso, slot.start),
           end: dateAt(iso, slot.end),

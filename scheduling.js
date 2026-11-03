@@ -1,12 +1,16 @@
 // Staffing rules for participant visits. Nothing here touches the page, so the same rules run on the website,
 // in tests, and in the Google Apps Script that copies staffing to Google Calendar (apps-script/Code.gs).
 
-const SKILLS = ["Wet Lab", "Dry Lab", "Phlebotomy", "Level 1 Scanning", "Level 2 Scanning", "Auxiliary Support Scanning"];
-// Training saved before the scanner trainings were renamed is read under the new names.
+// Phlebotomy levels, most experienced first. Each person has at most one.
+const PHLEBOTOMY_LEVELS = ["Experienced Phlebotomist", "Phlebotomist", "Training Phlebotomist"];
+const PHLEBOTOMY_TAGS = ["Experienced", "Regular", "Training"];
+const SKILLS = ["Wet Lab", "Dry Lab", ...PHLEBOTOMY_LEVELS, "Level 1 Scanning", "Level 2 Scanning", "Auxiliary Support Scanning"];
+// Training saved under older names is read under the new ones. Phlebotomy from before there were levels counts as Phlebotomist.
 const SKILL_RENAMES = {
   "Level 1 Scanner": "Level 1 Scanning",
   "Level 2 Scanner": "Level 2 Scanning",
   "Auxiliary Support Scanner": "Auxiliary Support Scanning",
+  Phlebotomy: "Phlebotomist",
 };
 const SECONDARY_SKILLS = ["Wanding/Taping"];
 const DEFAULT_SLOTS = {
@@ -53,7 +57,15 @@ function isOffHours(iso, start, end) {
 }
 
 function normalizeSkills(skills) {
-  return [...new Set((skills || []).map((skill) => SKILL_RENAMES[skill] || skill))];
+  const renamed = [...new Set((skills || []).map((skill) => SKILL_RENAMES[skill] || skill))];
+  // Only the highest phlebotomy level is kept.
+  const level = PHLEBOTOMY_LEVELS.find((name) => renamed.includes(name));
+  return renamed.filter((skill) => !PHLEBOTOMY_LEVELS.includes(skill) || skill === level);
+}
+
+// 0 for Experienced Phlebotomist, 1 for Phlebotomist, 2 for Training Phlebotomist, -1 for none.
+function phlebotomyLevel(person) {
+  return PHLEBOTOMY_LEVELS.findIndex((level) => person.skills.includes(level));
 }
 
 function withSkill(people, skill) {
@@ -104,11 +116,14 @@ function wetLabStarts(person, phlebotomyAt) {
 // Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab follows
 // phlebotomy as above, and must be a different person from Dry Lab. A slot is "tight" when it only works with a
 // particular timing, rather than phlebotomy at the start and Wet Lab straight after.
+// Phlebotomy goes to the most experienced level that works: without an Experienced Phlebotomist the slot gets a
+// warning, and with only a Training Phlebotomist it can't be staffed unless mobile phlebotomy is booked.
 function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
   const slotStart = timeToMinutes(slot.start);
   const slotEnd = timeToMinutes(slot.end);
   const dry = withSkill(people, "Dry Lab").filter((person) => freeBetween(person, slotStart, slotEnd));
-  const phlebotomists = withSkill(people, "Phlebotomy");
+  const phlebotomists = people.filter((person) => phlebotomyLevel(person) >= 0)
+    .sort((a, b) => phlebotomyLevel(a) - phlebotomyLevel(b));
   const wetLabbers = withSkill(people, "Wet Lab");
 
   const options = [];
@@ -126,7 +141,7 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
   for (const option of options) {
     if (!option.phlebotomy.length) continue;
     const choice = option.wet.find((candidate) => dry.some((dryPerson) => dryPerson !== candidate.person));
-    if (choice) plans.push({ phlebotomyAt: option.at, wetStart: choice.start });
+    if (choice) plans.push({ phlebotomyAt: option.at, wetStart: choice.start, level: phlebotomyLevel(option.phlebotomy[0]) });
   }
 
   const problems = [];
@@ -140,16 +155,26 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
       : "Phlebotomy and Wet Lab can't be lined up: Wet Lab needs 2 hours, starting within 30 minutes after phlebotomy ends");
   }
 
-  const standard = plans.find((plan) => plan.phlebotomyAt === slotStart && plan.wetStart === slotStart + PHLEBOTOMY_MINUTES);
+  const level = Math.min(...(plans.length ? plans.map((plan) => plan.level) : phlebotomy.map(phlebotomyLevel)));
+  const warnings = [];
+  if (level === 2) {
+    problems.push("Only a Training Phlebotomist is available: this visit can only be staffed if mobile phlebotomy is booked in advance");
+  } else if (level === 1) {
+    warnings.push("No Experienced Phlebotomist is available: mobile phlebotomy may need to be on stand-by, and if the participant has difficult veins, book mobile phlebotomy in advance");
+  }
+
+  const levelPlans = plans.filter((plan) => plan.level === level);
+  const standard = levelPlans.find((plan) => plan.phlebotomyAt === slotStart && plan.wetStart === slotStart + PHLEBOTOMY_MINUTES);
   const tight = !problems.length && !standard;
-  const plan = problems.length ? null : standard || plans[0];
+  const plan = problems.length ? null : standard || levelPlans[0];
 
   // Anyone who can only help at certain times is marked, with the details listed under the names.
   const notes = [];
   const markPhlebotomy = phlebotomy.map((person) => {
-    if (freeBetween(person, slotStart, slotEnd)) return person;
+    const tagged = { ...person, tag: PHLEBOTOMY_TAGS[phlebotomyLevel(person)] };
+    if (freeBetween(person, slotStart, slotEnd)) return tagged;
     notes.push(`${person.name} (Phlebotomy): free ${freeStretches(person, slotStart, slotEnd).join(", ")}`);
-    return { ...person, limited: true };
+    return { ...tagged, limited: true };
   });
   const markWet = wet.map((person) => {
     if (wetLabStarts(person, slotStart).includes(slotStart + PHLEBOTOMY_MINUTES)) return person;
@@ -166,6 +191,7 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
       { label: "Phlebotomy", people: markPhlebotomy },
     ],
     problems,
+    warnings,
     tight,
     timing: plan && tight
       ? `Works if phlebotomy is at ${clockTime(plan.phlebotomyAt)} and Wet Lab runs ${clockTime(plan.wetStart)}–${clockTime(plan.wetStart + WET_LAB_MINUTES)}`
@@ -174,14 +200,15 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
   };
 }
 
-// For showing a result: "problem", "tight" or "ready", and names with an asterisk when someone is only free part of the time.
+// For showing a result: "problem", "tight" (amber: tight timing or a warning) or "ready", and names with an asterisk
+// when someone is only free part of the time, plus their phlebotomy level.
 function staffingState(result) {
   if (result.problems.length) return "problem";
-  return result.tight ? "tight" : "ready";
+  return result.tight || (result.warnings || []).length ? "tight" : "ready";
 }
 
 function personLabel(person) {
-  return person.limited ? `${person.name}*` : person.name;
+  return `${person.name}${person.limited ? "*" : ""}${person.tag ? ` (${person.tag})` : ""}`;
 }
 
 // Two scanners are needed. Auxiliary support only counts alongside someone with Level 2 Scanning,
