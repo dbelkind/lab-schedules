@@ -548,6 +548,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   height: 8px;
   cursor: ns-resize;
 }
+.entry-resize-top { top: 0; bottom: auto; }
 
 .entry.ghost {
   border: 1px dashed var(--member);

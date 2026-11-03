@@ -481,7 +481,7 @@ function makeClickable(node, onOpen) {
   });
 }
 
-// A click opens the details. Dragging moves the block, and dragging its bottom edge changes when it ends.
+// A click opens the details. Dragging moves the block, and dragging its top or bottom edge changes when it starts or ends.
 function makeInteractive(node, { start, end, draggable, onOpen, onCommit }) {
   node.classList.add("clickable");
   node.tabIndex = 0;
@@ -494,12 +494,14 @@ function makeInteractive(node, { start, end, draggable, onOpen, onCommit }) {
   });
   if (draggable) {
     node.classList.add("draggable");
-    node.append(el("div", "entry-resize"));
+    node.append(el("div", "entry-resize entry-resize-top"), el("div", "entry-resize"));
   }
   node.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.stopPropagation();
-    const resizing = event.target.classList.contains("entry-resize");
+    const edge = event.target.classList.contains("entry-resize")
+      ? (event.target.classList.contains("entry-resize-top") ? "start" : "end")
+      : null;
     const originY = event.clientY;
     const startMinutes = toMinutes(start);
     const endMinutes = toMinutes(end);
@@ -515,7 +517,9 @@ function makeInteractive(node, { start, end, draggable, onOpen, onCommit }) {
       if (Math.abs(moveEvent.clientY - originY) > 4) moved = true;
       if (!moved) return;
       const delta = snapMinutes(pixelsToMinutes(moveEvent.clientY - originY));
-      if (resizing) {
+      if (edge === "start") {
+        newStart = Math.max(lowest, Math.min(endMinutes - SNAP_MINUTES, startMinutes + delta));
+      } else if (edge === "end") {
         newEnd = Math.max(startMinutes + SNAP_MINUTES, Math.min(highest, endMinutes + delta));
       } else {
         const length = endMinutes - startMinutes;
