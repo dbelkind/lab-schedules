@@ -129,10 +129,12 @@ function lengthText(minutes) {
 }
 
 // The lab portion normally starts at 9:00 AM and the scan at 11:00 AM, each lasting 2 hours. Anything else is
-// called out wherever the visit is shown, so nobody turns up at the usual time by mistake.
-function unusualTimes(appointment) {
+// called out, so nobody turns up at the usual time by mistake. Pass "lab" or "scan" for just that portion: a shorter
+// scan only affects the scan, while a scan moved earlier cuts the lab portion short too, so both are flagged.
+// Without one, it covers the whole visit, which is what matters to bookers and participants.
+function unusualTimes(appointment, only) {
   const notes = [];
-  for (const kind of ["lab", "scan"]) {
+  for (const kind of only ? [only] : ["lab", "scan"]) {
     const slot = appointment[kind];
     if (!slot) continue;
     const usual = DEFAULT_SLOTS[kind];
@@ -735,26 +737,27 @@ function bookingEmail({ when, parts, seeTime, link }) {
 // Each assigned person's roles on a visit, as [{ email, role, from, to }] with times in minutes.
 function staffRoles(appointment, assignment) {
   const roles = [];
-  const add = (email, role, from, to) => {
-    if (email) roles.push({ email, role, from, to });
+  // `part` is the portion the role belongs to; lab managers cover the whole visit.
+  const add = (email, role, from, to, part) => {
+    if (email) roles.push({ email, role, from, to, part });
   };
   if (appointment.lab && assignment.lab) {
     const lab = assignment.lab;
-    add(lab.dryLab, "Dry Lab", timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end));
+    add(lab.dryLab, "Dry Lab", timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end), "lab");
     const at = timeToMinutes(lab.phlebotomyAt || appointment.lab.start);
-    add(lab.phlebotomy, "Phlebotomy", at, at + PHLEBOTOMY_MINUTES);
+    add(lab.phlebotomy, "Phlebotomy", at, at + PHLEBOTOMY_MINUTES, "lab");
     const wetStart = timeToMinutes(lab.wetLabStart || appointment.lab.start);
-    add(lab.wetLab, "Wet Lab", wetStart, wetStart + WET_LAB_MINUTES);
+    add(lab.wetLab, "Wet Lab", wetStart, wetStart + WET_LAB_MINUTES, "lab");
   }
   if (appointment.scan && assignment.scan) {
     const from = timeToMinutes(appointment.scan.start);
     const to = timeToMinutes(appointment.scan.end);
-    add(assignment.scan.lead, "Lead scanner", from, to);
-    add(assignment.scan.support, "Support scanner", from, to);
-    add(assignment.scan.wanding, "Wanding/Taping", from, to);
+    add(assignment.scan.lead, "Lead scanner", from, to, "scan");
+    add(assignment.scan.support, "Support scanner", from, to, "scan");
+    add(assignment.scan.wanding, "Wanding/Taping", from, to, "scan");
   }
   const window = visitWindow(appointment);
-  for (const email of assignment.managers || []) add(email, "Lab manager", window.start, window.end);
+  for (const email of assignment.managers || []) add(email, "Lab manager", window.start, window.end, "visit");
   return roles;
 }
 

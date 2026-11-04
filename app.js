@@ -435,8 +435,9 @@ function partsText(appointment) {
     .join(" · ");
 }
 
-function unusualNotice(appointment) {
-  const notes = unusualTimes(appointment);
+// Pass "lab" or "scan" to show just that portion's unusual times.
+function unusualNotice(appointment, kind) {
+  const notes = unusualTimes(appointment, kind);
   if (!notes.length) return [];
   const box = el("div", "unusual-box");
   box.append(el("strong", "", `${SEE_TIME} These aren't the usual times:`));
@@ -486,7 +487,7 @@ function renderLabColumn(column, iso) {
       el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`),
     );
     const chips = el("div", "slot-chips");
-    if (unusualTimes(appointment).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
+    if (unusualTimes(appointment, item.kind).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
     if (visitPartsLabel(appointment)) chips.append(el("span", "slot-chip", visitPartsLabel(appointment)));
     if (showsBooking(iso, appointment)) {
       chips.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, BOOKING_SHORT[appointment.booking || "open"]));
@@ -1051,7 +1052,7 @@ function openSlotDialog(iso, appointment, kind) {
   const parts = visitPartsLabel(appointment);
   const body = [
     el("p", "muted", `${formatIsoWithDay(iso)} · ${number ? `Visit ${number}, ` : "Visit "}${visitTimesText(appointment)}${parts ? ` · ${parts}` : ""}`),
-    ...unusualNotice(appointment),
+    ...unusualNotice(appointment, kind),
     times.node,
   ];
   let wandingBox = null;
@@ -1297,12 +1298,11 @@ function openStaffingDialog(iso, appointment) {
   const render = () => {
     const body = [
       el("p", "muted", `${formatIsoWithDay(iso)} · Visit ${visitTimesText(appointment)} · ${partsText(appointment)}`),
-      ...unusualNotice(appointment),
       el("p", "muted", "Suggestions use the most experienced phlebotomist available, then favor whoever has the fewest visits within four weeks. Pick another option, or change any role below."),
     ];
     if (draft.lab) {
       const section = el("div", "staff-section");
-      section.append(el("h3", "", `Lab portion, ${formatTime(appointment.lab.start)} – ${formatTime(appointment.lab.end)}`));
+      section.append(el("h3", "", `Lab portion, ${formatTime(appointment.lab.start)} – ${formatTime(appointment.lab.end)}`), ...unusualNotice(appointment, "lab"));
       section.append(optionList(options.lab,
         (choice) => `Dry Lab: ${nameOf(choice.dryLab)} · Phlebotomy: ${nameOf(choice.phlebotomy)}${tagOf(byEmail.get(choice.phlebotomy))} at ${formatTime(choice.phlebotomyAt)} · Wet Lab: ${nameOf(choice.wetLab)} from ${formatTime(choice.wetLabStart)}${choice.standard ? "" : " (tight timing)"}`,
         (choice) => choice.dryLab === draft.lab.dryLab && choice.phlebotomy === draft.lab.phlebotomy && choice.wetLab === draft.lab.wetLab,
@@ -1323,7 +1323,7 @@ function openStaffingDialog(iso, appointment) {
     }
     if (draft.scan) {
       const section = el("div", "staff-section");
-      section.append(el("h3", "", `Scan, ${formatTime(appointment.scan.start)} – ${formatTime(appointment.scan.end)}`));
+      section.append(el("h3", "", `Scan, ${formatTime(appointment.scan.start)} – ${formatTime(appointment.scan.end)}`), ...unusualNotice(appointment, "scan"));
       section.append(optionList(options.scan,
         (choice) => `Lead: ${nameOf(choice.lead)} · Support: ${nameOf(choice.support)}${choice.wanding ? ` · Wanding/Taping: ${nameOf(choice.wanding)}` : ""}`,
         (choice) => choice.lead === draft.scan.lead && choice.support === draft.scan.support && choice.wanding === draft.scan.wanding,

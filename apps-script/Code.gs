@@ -604,8 +604,9 @@ function visitsOn(rules, iso, appointments, holidays, through) {
     .sort((a, b) => rules.visitWindow(a).start - rules.visitWindow(b).start);
 }
 
-function unusualLines(rules, appointment) {
-  const notes = rules.unusualTimes(appointment);
+// Pass "lab" or "scan" for just that portion's unusual times.
+function unusualLines(rules, appointment, kind) {
+  const notes = rules.unusualTimes(appointment, kind);
   return notes.length ? [`${rules.SEE_TIME} These aren't the usual times:`, ...notes.map((note) => `• ${note}`), ""] : [];
 }
 
@@ -730,7 +731,9 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
     if (index === -1) continue;
     const appointment = visits[index];
     const number = visits.length > 1 ? ` (visit ${index + 1} of ${visits.length} that day)` : "";
-    const unusual = rules.unusualTimes(appointment).length > 0;
+    // The visit event is flagged for the lab portion's times (or the scan's, for a scan-only visit), and the scan
+    // event for the scan's, so a shorter scan doesn't flag the lab staff's invite.
+    const visitPart = appointment.lab ? "lab" : "scan";
     const window = rules.visitWindow(appointment);
     const range = (from, to) => `${rules.clockTime(from)} – ${rules.clockTime(to)}`;
     const assigned = rules.assignmentLines(appointment, doc, nameOf);
@@ -740,15 +743,15 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
       appointment.lab ? `Lab portion: ${emailTime(appointment.lab.start)} – ${emailTime(appointment.lab.end)}` : "",
       appointment.scan ? `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}` : "",
     ].filter(Boolean);
-    const prefix = unusual ? `${rules.SEE_TIME} ` : "";
+    const prefixFor = (part) => (rules.unusualTimes(appointment, part).length ? `${rules.SEE_TIME} ` : "");
 
     const visitPeople = [...new Set([lab.dryLab, lab.phlebotomy, lab.wetLab, ...(doc.managers || [])].filter(Boolean))];
     if (visitPeople.length && (appointment.lab || (doc.managers || []).length)) {
       events.push({
         key: `${doc.visitKey}:visit`,
-        title: `${prefix}Participant Visit${number}`,
+        title: `${prefixFor(visitPart)}Participant Visit${number}`,
         description: [
-          ...unusualLines(rules, appointment),
+          ...unusualLines(rules, appointment, visitPart),
           `Whole visit: ${range(window.start, window.end)}`,
           ...parts,
           "",
@@ -770,9 +773,9 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
     if (appointment.scan && scanPeople.length) {
       events.push({
         key: `${doc.visitKey}:scan`,
-        title: `${prefix}Participant Visit - Scan${number}`,
+        title: `${prefixFor("scan")}Participant Visit - Scan${number}`,
         description: [
-          ...unusualLines(rules, appointment),
+          ...unusualLines(rules, appointment, "scan"),
           `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}`,
           `Whole visit: ${range(window.start, window.end)}`,
           "",
@@ -819,13 +822,21 @@ function staffSnapshot(rules, appointments, holidays, staffing, today) {
     if (!appointment) continue;
     const window = rules.visitWindow(appointment);
     const people = {};
+    const parts = {};
     for (const role of rules.staffRoles(appointment, doc)) {
       (people[role.email] = people[role.email] || []).push(`${role.role}, ${rules.clockTime(role.from)}–${rules.clockTime(role.to)}`);
+      (parts[role.email] = parts[role.email] || new Set()).add(role.part);
+    }
+    // Each person is only pointed to unusual times in the portion they work; lab managers see both.
+    const seeTime = {};
+    for (const [email, theirs] of Object.entries(parts)) {
+      seeTime[email] = theirs.has("visit") ? rules.unusualTimes(appointment)
+        : ["lab", "scan"].filter((part) => theirs.has(part)).flatMap((part) => rules.unusualTimes(appointment, part));
     }
     snapshot[doc.visitKey] = {
       date: doc.date,
       visit: `${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}`,
-      seeTime: rules.unusualTimes(appointment),
+      seeTime,
       people,
     };
   }
@@ -841,8 +852,10 @@ function staffChanges(before, after, todayIso, stillScheduled) {
     const old = before[key];
     for (const [email, roles] of Object.entries(visit.people)) {
       const was = old && old.people[email];
-      if (!was) add(email, { type: "assigned", visit, roles });
-      else if (was.join("|") !== roles.join("|") || old.visit !== visit.visit || old.date !== visit.date) add(email, { type: "changed", visit, roles, was, oldVisit: old });
+      const seeTime = (visit.seeTime && visit.seeTime[email]) || [];
+      // Only someone's own roles and times count: a moved scan doesn't email the lab staff.
+      if (!was) add(email, { type: "assigned", visit, roles, seeTime });
+      else if (was.join("|") !== roles.join("|") || old.date !== visit.date) add(email, { type: "changed", visit, roles, was, oldVisit: old, seeTime });
     }
     for (const [email, roles] of Object.entries((old && old.people) || {})) {
       if (!visit.people[email]) add(email, { type: "removed", visit: old, roles });
@@ -880,14 +893,14 @@ function staffEmail(rules, name, changes) {
       lines.push(`The participant visit on ${date} (${change.visit.visit}) has been cancelled. You were down for: ${change.roles.join("; ")}.`);
     }
     const current = change.type === "assigned" || change.type === "changed";
-    if (current && change.visit.seeTime.length) {
-      lines.push(`${rules.SEE_TIME} These aren't the usual times, so please check yours:`, ...change.visit.seeTime.map((note) => `• ${note}`));
+    if (current && (change.seeTime || []).length) {
+      lines.push(`${rules.SEE_TIME} These aren't the usual times, so please check yours:`, ...change.seeTime.map((note) => `• ${note}`));
     }
     lines.push("");
   }
   lines.push("Your Google Calendar has been updated to match. Questions? Ask a lab manager.");
   const first = changes[0];
-  const seeTime = changes.some((change) => (change.type === "assigned" || change.type === "changed") && change.visit.seeTime.length);
+  const seeTime = changes.some((change) => (change.type === "assigned" || change.type === "changed") && (change.seeTime || []).length);
   const subject = changes.length === 1 ? STAFF_SUBJECTS[first.type](emailDateWithDay(first.visit.date)) : `Lab visits: ${changes.length} updates for you`;
   return { subject: `${subject}${seeTime ? ` ${rules.SEE_TIME}` : ""}`, body: lines.join("\n") };
 }
@@ -955,17 +968,19 @@ function sendTestEmails() {
   });
   send("reviewers from a booker (the site drafts it in the booker's own email; they fill in the Screener ID)", booker.subject, booker.body);
 
-  const visit = { date: "2027-01-12", visit: "9:00 AM – 1:00 PM", seeTime: rules.unusualTimes(early), people: {} };
+  const visit = { date: "2027-01-12", visit: "9:00 AM – 1:00 PM", people: {} };
   const roles = ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:30 AM–11:30 AM"];
+  // Lab staff only hear about the lab portion's unusual times.
+  const seeTime = rules.unusualTimes(early, "lab");
   const staffSample = (changes) => {
     const { subject, body } = staffEmail(rules, "Jordan", changes);
     send("staff (once staff emails are switched on)", subject, body);
   };
-  staffSample([{ type: "assigned", visit, roles }]);
-  staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:45 AM–11:45 AM"], was: roles, oldVisit: visit }]);
-  staffSample([{ type: "removed", visit: { ...visit, seeTime: [] }, roles }]);
-  staffSample([{ type: "cancelled", visit: { ...visit, seeTime: [] }, roles }]);
-  staffSample([{ type: "assigned", visit, roles }, { type: "cancelled", visit: { ...visit, date: "2027-01-14", seeTime: [] }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);
+  staffSample([{ type: "assigned", visit, roles, seeTime }]);
+  staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:45 AM–11:45 AM"], was: roles, oldVisit: visit, seeTime }]);
+  staffSample([{ type: "removed", visit, roles }]);
+  staffSample([{ type: "cancelled", visit, roles }]);
+  staffSample([{ type: "assigned", visit, roles, seeTime }, { type: "cancelled", visit: { ...visit, date: "2027-01-14" }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);
   console.log(`Sent 13 test emails to ${to}.`);
 }
 
