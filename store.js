@@ -40,6 +40,11 @@ const Store = (() => {
       return (await db.collection("members").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
     },
 
+    // Bookers can't see the lab list, only who the reviewers are, so they can email them.
+    async listReviewers() {
+      return (await db.collection("members").where("role", "==", "reviewer").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
+    },
+
     // Pass an email to get one person's entries. Only reviewers may leave it out.
     listAvailability: (ownerEmail) => listAll("availability", ownerEmail),
     listTimeOff: (ownerEmail) => listAll("timeOff", ownerEmail),
@@ -91,6 +96,37 @@ const Store = (() => {
 
     deleteAppointment: (id) => db.collection("appointments").doc(id).delete(),
 
+    // Booking only touches the booking fields. A default visit nobody has changed yet is saved as it is, plus the booking.
+    bookVisit(appointment, fields) {
+      const ref = db.collection("appointments");
+      if (appointment.id) return ref.doc(appointment.id).update(fields);
+      return ref.doc(`default-${appointment.defaultFor}`).set({
+        date: appointment.date,
+        defaultFor: appointment.defaultFor,
+        cancelled: false,
+        lab: appointment.lab,
+        scan: appointment.scan,
+        ...fields,
+      });
+    },
+
+    // The lab directory (name, directory role and phone), which everyone in the lab can see.
+    listDirectory: async () => (await db.collection("directory").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() })),
+    saveDirectory: (email, data) => db.collection("directory").doc(email).set(data, { merge: true }),
+
+    // Birthdays, graduation and favorites, which only the person and lab managers can see.
+    async getProfile(email) {
+      const doc = await db.collection("profiles").doc(email).get();
+      return doc.exists ? doc.data() : null;
+    },
+    listProfiles: async () => (await db.collection("profiles").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() })),
+    saveProfile: (email, data) => db.collection("profiles").doc(email).set(data),
+
+    // Who is staffing each visit, saved under the visit's key. Only reviewers can read or change these.
+    listStaffing: () => listAll("staffing"),
+    saveStaffing: (key, data) => db.collection("staffing").doc(key).set(data),
+    deleteStaffing: (key) => db.collection("staffing").doc(key).delete(),
+
     deleteAvailability: (id) => db.collection("availability").doc(id).delete(),
 
     saveTimeOff(id, data) {
@@ -108,7 +144,7 @@ const Store = (() => {
       return db.collection("members").doc(email).set(data);
     },
 
-    // Removing someone also removes their schedule, so nothing of theirs is left behind.
+    // Removing someone also removes their schedule, directory entry and profile, so nothing of theirs is left behind.
     async deleteMember(email) {
       const [availability, timeOff, changes] = await Promise.all([
         listAll("availability", email),
@@ -119,6 +155,8 @@ const Store = (() => {
       for (const { id } of availability) batch.delete(db.collection("availability").doc(id));
       for (const { id } of timeOff) batch.delete(db.collection("timeOff").doc(id));
       for (const { id } of changes) batch.delete(db.collection("changeRequests").doc(id));
+      batch.delete(db.collection("directory").doc(email));
+      batch.delete(db.collection("profiles").doc(email));
       batch.delete(db.collection("members").doc(email));
       return batch.commit();
     },

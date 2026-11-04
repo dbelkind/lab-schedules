@@ -6,3 +6,7 @@ const FIREBASE_CONFIG = {
   projectId: "lab-schedules",
   appId: "1:1028767888591:web:6840673d59d100dac7f3ba",
 };
+
+// The Apps Script's web app URL (in Apps Script: Deploy > Manage deployments), so the site can ask it to update
+// LCL Visits and send cancellation emails straight away after a change. Left empty, they happen every 10 minutes.
+const SYNC_URL = "";

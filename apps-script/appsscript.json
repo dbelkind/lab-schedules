@@ -4,7 +4,11 @@
   "exceptionLogging": "STACKDRIVER",
   "dependencies": {
     "enabledAdvancedServices": [
-      { "userSymbol": "Calendar", "serviceId": "calendar", "version": "v3" }
+      {
+        "userSymbol": "Calendar",
+        "serviceId": "calendar",
+        "version": "v3"
+      }
     ]
   },
   "oauthScopes": [
@@ -13,5 +17,9 @@
     "https://www.googleapis.com/auth/script.external_request",
     "https://www.googleapis.com/auth/script.scriptapp",
     "https://www.googleapis.com/auth/script.send_mail"
-  ]
+  ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
 }

@@ -22,6 +22,14 @@ service cloud.firestore {
     function isGrad() {
       return isMember() && get(memberPath()).data.role == 'grad';
     }
+    // Anyone with the Booking responsibility can book participants into visits.
+    function isBooker() {
+      return isMember() && get(memberPath()).data.get('skills', []).hasAny(['Booking']);
+    }
+    // Matches titleOf in scheduling.js: the directory role someone gets until a lab manager picks one.
+    function defaultTitle(member) {
+      return member.role == 'reviewer' ? 'Lab Manager' : (member.role == 'grad' ? 'PhD Student' : 'RA');
+    }
     function owns(data) {
       return isMember() && data.ownerEmail == email();
     }
@@ -79,18 +87,61 @@ service cloud.firestore {
         && (!('reviewNote' in data) || (data.reviewNote is string && data.reviewNote.size() <= 200));
     }
 
+    // Bookers can look up the reviewers, so they can email them a booking's participant details.
     match /members/{memberEmail} {
-      allow get: if verified() && (memberEmail == email() || isReviewer());
-      allow list: if isReviewer();
+      allow get: if verified() && (memberEmail == email() || isReviewer() || (isBooker() && resource.data.role == 'reviewer'));
+      allow list: if isReviewer() || (isBooker() && resource.data.role == 'reviewer');
       allow create, update: if isReviewer()
         && memberEmail == memberEmail.lower()
-        && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify'])
+        && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify', 'emails', 'title'])
         && request.resource.data.name is string && request.resource.data.name.size() > 0
         && request.resource.data.role in ['member', 'ra', 'grad', 'reviewer']
         && (!('skills' in request.resource.data)
-          || (request.resource.data.skills is list && request.resource.data.skills.size() <= 7))
-        && (!('notify' in request.resource.data) || request.resource.data.notify is bool);
+          || (request.resource.data.skills is list && request.resource.data.skills.size() <= 10))
+        && (!('notify' in request.resource.data) || request.resource.data.notify is bool)
+        && (!('title' in request.resource.data) || request.resource.data.title in ['RA', 'PhD Student', 'Post-Doc', 'Lab Manager', 'PI'])
+        && (!('emails' in request.resource.data) || (request.resource.data.emails is map
+          && request.resource.data.emails.keys().hasOnly(['requests', 'updates', 'bookings', 'cancellations', 'scanReminders', 'celebrations'])));
       allow delete: if isReviewer() && memberEmail != email();
+    }
+
+    // The lab directory: everyone in the lab can see each other's name, directory role and phone number.
+    // Lab managers keep names and roles in step with the lab list; people add and change their own phone number.
+    match /directory/{memberEmail} {
+      allow read: if isMember();
+      allow create, update: if isReviewer()
+        && request.resource.data.keys().hasOnly(['name', 'title', 'phone'])
+        && request.resource.data.name is string
+        && request.resource.data.title in ['RA', 'PhD Student', 'Post-Doc', 'Lab Manager', 'PI']
+        && (!('phone' in request.resource.data) || (request.resource.data.phone is string && request.resource.data.phone.size() <= 30));
+      allow create: if memberEmail == email() && isMember()
+        && request.resource.data.keys().hasOnly(['name', 'title', 'phone'])
+        && request.resource.data.name == get(memberPath()).data.name
+        && request.resource.data.title == get(memberPath()).data.get('title', defaultTitle(get(memberPath()).data))
+        && request.resource.data.phone is string && request.resource.data.phone.size() <= 30;
+      allow update: if memberEmail == email() && isMember()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phone'])
+        && request.resource.data.phone is string && request.resource.data.phone.size() <= 30;
+      allow delete: if isReviewer();
+    }
+
+    // Birthdays, expected graduation and favorites: only the person and lab managers can see them,
+    // and only the person can change them.
+    function shortText(value) {
+      return value is string && value.size() > 0 && value.size() <= 100;
+    }
+    function validProfile(data) {
+      return data.keys().hasAll(['birthday', 'graduation', 'color', 'dessert', 'dietary', 'updatedAt'])
+        && data.keys().hasOnly(['birthday', 'graduation', 'color', 'dessert', 'dietary', 'updatedAt'])
+        && data.birthday is string && data.birthday.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.graduation is string && (data.graduation == 'n/a' || data.graduation.matches('^[0-9]{4}-[0-9]{2}$'))
+        && shortText(data.color) && shortText(data.dessert) && shortText(data.dietary)
+        && data.updatedAt is string;
+    }
+    match /profiles/{memberEmail} {
+      allow read: if verified() && (memberEmail == email() || isReviewer());
+      allow create, update: if memberEmail == email() && isMember() && validProfile(request.resource.data);
+      allow delete: if isReviewer();
     }
 
     // Members can add new entries, but changing or removing a saved one goes through a change request,
@@ -128,12 +179,52 @@ service cloud.firestore {
         && request.resource.data.createdAt is string;
     }
 
+    function appointmentKeys() {
+      return ['date', 'defaultFor', 'cancelled', 'lab', 'scan', 'booking', 'bookedBy', 'bookedByName', 'bookedAt'];
+    }
+    function bookingKeys() {
+      return ['booking', 'bookedBy', 'bookedByName', 'bookedAt'];
+    }
+    function validBookingBy(data) {
+      return data.booking in ['booked', 'rebooking']
+        && data.bookedBy == email()
+        && data.bookedByName is string && data.bookedByName.size() <= 100
+        && data.bookedAt is string;
+    }
+
+    // Visits hold no participant information, only times and whether they're booked.
+    // Bookers can only book a visit or cancel its booking, from the spring 2027 visits on.
     match /appointments/{id} {
-      allow read: if isReviewer();
+      allow read: if isReviewer() || isBooker();
       allow create, update: if isReviewer()
-        && request.resource.data.keys().hasOnly(['date', 'defaultFor', 'cancelled', 'lab', 'scan'])
+        && request.resource.data.keys().hasOnly(appointmentKeys())
         && request.resource.data.date is string;
+      allow create: if isBooker()
+        && request.resource.data.keys().hasOnly(appointmentKeys())
+        && validBookingBy(request.resource.data)
+        && request.resource.data.date is string && request.resource.data.date >= '2027-01-03'
+        && id == 'default-' + request.resource.data.date
+        && request.resource.data.defaultFor == request.resource.data.date
+        && request.resource.data.cancelled == false
+        && request.resource.data.lab == {'start': '09:00', 'end': '11:00'}
+        && request.resource.data.scan == {'start': '11:00', 'end': '13:00', 'wandingRequired': true};
+      allow update: if isBooker()
+        && resource.data.cancelled == false
+        && resource.data.date >= '2027-01-03'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(bookingKeys())
+        && validBookingBy(request.resource.data);
       allow delete: if isReviewer();
+    }
+
+    // Who is staffing each visit. Only reviewers see it; the Apps Script turns it into calendar events.
+    match /staffing/{key} {
+      allow read, delete: if isReviewer();
+      allow create, update: if isReviewer()
+        && request.resource.data.keys().hasOnly(['date', 'visitKey', 'lab', 'scan', 'managers', 'approvedBy', 'approvedAt'])
+        && request.resource.data.visitKey == key
+        && request.resource.data.date is string
+        && request.resource.data.managers is list && request.resource.data.managers.size() <= 3
+        && request.resource.data.approvedBy == email();
     }
 
     match /timeOff/{id} {

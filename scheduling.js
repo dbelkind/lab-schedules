@@ -13,12 +13,48 @@ const SKILL_RENAMES = {
   Phlebotomy: "Phlebotomist",
 };
 const SECONDARY_SKILLS = ["Wanding/Taping"];
+// Responsibilities aren't staffing roles. Booking lets someone book participants into visits.
+const RESPONSIBILITIES = ["Booking"];
+// The emails reviewers can each turn on or off. Staff emails about visits they're staffing can't be turned off.
+const REVIEWER_EMAILS = [
+  { key: "requests", label: "Requests to review", help: "Time off requests and schedule changes from RAs, within about 10 minutes. Your own aren't emailed to you." },
+  { key: "updates", label: "Saved schedule changes", help: "Changes and time off that Grad Students/Post-Docs save without review." },
+  { key: "cancellations", label: "Cancellations", help: "Straight away when a booking is cancelled (the visit stays open to rebook), or a booked or staffed visit is cancelled. Bookings themselves come from the booker's own email." },
+  { key: "scanReminders", label: "Scan booking reminder", help: "At 8:30 AM each morning, which newly opened visit needs its scan booked." },
+  { key: "celebrations", label: "Birthdays and graduations", help: "At 8:30 AM, 1 month, 1 week and 1 day before, and on the day, with their favorite color, dessert and dietary restrictions/allergies." },
+];
+// What each person is in the lab directory. It's only a label: what someone can do on the site comes from their role.
+const DIRECTORY_TITLES = ["RA", "PhD Student", "Post-Doc", "Lab Manager", "PI"];
+
+// Someone whose directory role hasn't been chosen yet gets one from their site role. firestore.rules matches this.
+function titleOf(member) {
+  if (member.title) return member.title;
+  return member.role === "reviewer" ? "Lab Manager" : member.role === "grad" ? "PhD Student" : "RA";
+}
+
+// Marks a visit whose times aren't the usual ones, wherever it's shown.
+const SEE_TIME = "🕒 [SEE TIME]";
+
+// Before there were separate settings, one switch covered every email, so it still applies to any not set yet.
+function wantsEmail(member, kind) {
+  if (member.emails && kind in member.emails) return member.emails[kind] !== false;
+  return member.notify !== false;
+}
 const DEFAULT_SLOTS = {
   lab: { start: "09:00", end: "11:00" },
   scan: { start: "11:00", end: "13:00", wandingRequired: true },
 };
 const SLOT_TITLES = { lab: "Participant Visit - Lab", scan: "Participant Visit - Scan" };
 const REGULAR_HOURS = { start: "08:00", end: "17:00" };
+// A full visit lasts 4 hours from its start, even when the lab and scan portions take less. After the scan,
+// a lab manager finishes up the visit; that wrap-up is at least the last 30 minutes.
+const VISIT_MINUTES = 240;
+const WRAP_UP_MINUTES = 30;
+// Default visits open 60 days ahead, with the newest day added at 8:00 AM each morning.
+const VISITS_DAYS_AHEAD = 60;
+const VISITS_OPEN_HOUR = 8;
+// Booking on the website starts with the spring 2027 visits. Earlier ones were booked the old way.
+const BOOKING_STARTS = "2027-01-03";
 
 function isoWeekday(iso) {
   const [y, month, day] = iso.split("-").map(Number);
@@ -29,11 +65,27 @@ function staffHolidayOn(iso, holidays) {
   return holidays.find((holiday) => holiday.from <= iso && iso <= holiday.to) || null;
 }
 
-// Every weekday that isn't a staff holiday gets a default visit. Saved records only hold changes to it, plus extra visits.
-function appointmentsOn(iso, stored, holidays) {
+function isoOfDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function shiftIsoDays(iso, count) {
+  const [y, month, day] = iso.split("-").map(Number);
+  return isoOfDate(new Date(y, month - 1, day + count));
+}
+
+// The last date that has its default visit yet: 60 days from today from 8:00 AM, 59 before then.
+function defaultVisitsThrough(now) {
+  const ahead = VISITS_DAYS_AHEAD - (now.getHours() < VISITS_OPEN_HOUR ? 1 : 0);
+  return isoOfDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() + ahead));
+}
+
+// Every weekday that isn't a staff holiday gets a default visit, up to `through` when it's given.
+// Saved records only hold changes to it, plus extra visits.
+function appointmentsOn(iso, stored, holidays, through) {
   const list = [];
   const weekday = isoWeekday(iso);
-  if (weekday !== 0 && weekday !== 6 && !staffHolidayOn(iso, holidays)) {
+  if (weekday !== 0 && weekday !== 6 && !staffHolidayOn(iso, holidays) && (!through || iso <= through)) {
     const override = stored.find((appointment) => appointment.defaultFor === iso);
     if (!override) {
       list.push({ id: null, defaultFor: iso, date: iso, lab: { ...DEFAULT_SLOTS.lab }, scan: { ...DEFAULT_SLOTS.scan } });
@@ -42,13 +94,60 @@ function appointmentsOn(iso, stored, holidays) {
     }
   }
   for (const appointment of stored) {
-    if (!appointment.defaultFor && appointment.date === iso) list.push(appointment);
+    if (!appointment.defaultFor && appointment.date === iso && !appointment.cancelled) list.push(appointment);
   }
   return list;
 }
 
 function cancelledDefaultOn(iso, stored) {
   return stored.find((appointment) => appointment.defaultFor === iso && appointment.cancelled) || null;
+}
+
+// Staffing and invites are stored under this key, which stays the same when a default visit is first changed.
+function visitKey(appointment) {
+  return appointment.id || `default-${appointment.defaultFor}`;
+}
+
+// In minutes: when the visit starts and ends, and when the wrap-up after the scan starts.
+// A visit with only one part lasts as long as that part.
+function visitWindow(appointment) {
+  const parts = ["lab", "scan"].filter((kind) => appointment[kind]).map((kind) => appointment[kind]);
+  const start = Math.min(...parts.map((part) => timeToMinutes(part.start)));
+  const partsEnd = Math.max(...parts.map((part) => timeToMinutes(part.end)));
+  const end = appointment.lab && appointment.scan ? Math.max(start + VISIT_MINUTES, partsEnd) : partsEnd;
+  const afterScan = appointment.scan ? timeToMinutes(appointment.scan.end) : partsEnd;
+  return { start, end, wrapUpStart: Math.max(start, Math.min(afterScan, end - WRAP_UP_MINUTES)) };
+}
+
+function lengthText(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
+  if (rest) parts.push(`${rest} minutes`);
+  return parts.join(" ");
+}
+
+// The lab portion normally starts at 9:00 AM and the scan at 11:00 AM, each lasting 2 hours. Anything else is
+// called out wherever the visit is shown, so nobody turns up at the usual time by mistake.
+function unusualTimes(appointment) {
+  const notes = [];
+  for (const kind of ["lab", "scan"]) {
+    const slot = appointment[kind];
+    if (!slot) continue;
+    const usual = DEFAULT_SLOTS[kind];
+    const name = kind === "lab" ? "Lab portion" : "Scan";
+    if (slot.start !== usual.start) notes.push(`${name} starts at ${clockTime(timeToMinutes(slot.start))} instead of ${clockTime(timeToMinutes(usual.start))}`);
+    const length = timeToMinutes(slot.end) - timeToMinutes(slot.start);
+    const usualLength = timeToMinutes(usual.end) - timeToMinutes(usual.start);
+    if (length !== usualLength) notes.push(`${name} is ${lengthText(length)} long instead of ${lengthText(usualLength)}`);
+  }
+  return notes;
+}
+
+function visitPartsLabel(appointment) {
+  if (appointment.lab && appointment.scan) return "";
+  return appointment.lab ? "Lab portion only" : "Scan only";
 }
 
 function isOffHours(iso, start, end) {
@@ -145,6 +244,7 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
   }
 
   const problems = [];
+  const flags = [];
   if (!wet.length) problems.push("No one available for Wet Lab");
   if (!dry.length) problems.push("No one available for Dry Lab");
   if (!phlebotomy.length) problems.push("No one available for Phlebotomy");
@@ -161,6 +261,7 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
     problems.push("Only a Training Phlebotomist is available: this visit can only be staffed if mobile phlebotomy is booked in advance");
   } else if (level === 1) {
     warnings.push("No Experienced Phlebotomist is available: mobile phlebotomy may need to be on stand-by, and if the participant has difficult veins, book mobile phlebotomy in advance");
+    flags.push("No experienced phlebotomist");
   }
 
   const levelPlans = plans.filter((plan) => plan.level === level);
@@ -192,6 +293,7 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
     ],
     problems,
     warnings,
+    flags,
     tight,
     timing: plan && tight
       ? `Works if phlebotomy is at ${clockTime(plan.phlebotomyAt)} and Wet Lab runs ${clockTime(plan.wetStart)}–${clockTime(plan.wetStart + WET_LAB_MINUTES)}`
@@ -245,6 +347,8 @@ function evaluateScan(people, { offHours, wandingRequired }) {
       { label: "Wanding/Taping Available", people: wanding },
     ],
     problems,
+    warnings: [],
+    flags: [],
   };
 }
 
@@ -282,6 +386,20 @@ function isBusyDuring(email, iso, startMinutes, endMinutes, data) {
   return inClassOrConflict || away;
 }
 
+// Everyone's unavailable times on a date, as { id, email, kind: "class" | "conflict" | "timeOff", start, end, note,
+// pending }. Whole days off have no start or end.
+function unavailableOn(iso, data) {
+  const weekday = WEEKDAY_NAMES[isoWeekday(iso)];
+  const classesMeet = classesMeetOn(iso, data.semesters, data.events);
+  const entries = data.availability
+    .filter((block) => block.from <= iso && (!block.to || iso <= block.to) && block.days.includes(weekday) && (block.type !== "class" || classesMeet))
+    .map((block) => ({ id: block.id, email: block.ownerEmail, kind: block.type, start: block.start, end: block.end, note: block.note || "", pending: false }));
+  const away = data.timeOff
+    .filter((request) => request.status !== "declined" && request.from <= iso && iso <= request.to)
+    .map((request) => ({ id: request.id, email: request.ownerEmail, kind: "timeOff", start: request.start || null, end: request.end || null, note: request.note || "", pending: request.status === "pending" }));
+  return [...entries, ...away];
+}
+
 function peopleAvailable(iso, start, end, data) {
   return data.members
     .filter((member) => (member.skills || []).length)
@@ -289,19 +407,360 @@ function peopleAvailable(iso, start, end, data) {
     .map((member) => ({ name: member.name, email: member.email, skills: member.skills }));
 }
 
+// People with their free time on a date, checked as it's needed. By default only people with training.
+function candidatesOn(iso, data, include = (member) => (member.skills || []).length) {
+  return data.members.filter(include).map((member) => ({
+    name: member.name,
+    email: member.email,
+    skills: member.skills || [],
+    role: member.role,
+    isFree: (from, to) => !isBusyDuring(member.email, iso, from, to, data),
+  }));
+}
+
 function evaluateVisitSlot(iso, slot, kind, data) {
   if (kind === "lab") {
     // Lab roles don't all need the whole slot, so each person's free time is checked as the timing is worked out.
-    const candidates = data.members
-      .filter((member) => (member.skills || []).length)
-      .map((member) => ({
-        name: member.name,
-        email: member.email,
-        skills: member.skills,
-        isFree: (from, to) => !isBusyDuring(member.email, iso, from, to, data),
-      }));
-    return evaluateLab(candidates, slot);
+    return evaluateLab(candidatesOn(iso, data), slot);
   }
   const people = peopleAvailable(iso, slot.start, slot.end, data);
   return evaluateScan(people, { offHours: isOffHours(iso, slot.start, slot.end), wandingRequired: slot.wandingRequired !== false });
+}
+
+// --- Lab managers ---
+// Reviewers are the lab managers. Ideally they cover the whole visit between them (handing off is fine);
+// at the very least one must be there for the wrap-up after the scan.
+
+function managerCandidates(iso, data) {
+  return candidatesOn(iso, data, (member) => member.role === "reviewer");
+}
+
+// The stretches of [from, to] when none of these people are free.
+function uncoveredStretches(people, from, to) {
+  const gaps = [];
+  let gapStart = null;
+  for (let minute = from; minute < to; minute += TIMING_STEP_MINUTES) {
+    const covered = people.some((person) => freeBetween(person, minute, Math.min(minute + TIMING_STEP_MINUTES, to)));
+    if (!covered && gapStart === null) gapStart = minute;
+    if (covered && gapStart !== null) {
+      gaps.push([gapStart, minute]);
+      gapStart = null;
+    }
+  }
+  if (gapStart !== null) gaps.push([gapStart, to]);
+  return gaps;
+}
+
+function stretchText(stretches) {
+  return stretches.map(([from, to]) => `${clockTime(from)}–${clockTime(to)}`).join(", ");
+}
+
+function evaluateManagers(managers, { start, end, wrapUpStart }) {
+  const notes = [];
+  const present = managers.filter((manager) => freeStretches(manager, start, end).length);
+  const people = present.map((manager) => {
+    if (freeBetween(manager, start, end)) return manager;
+    notes.push(`${manager.name} (Lab manager): free ${freeStretches(manager, start, end).join(", ")}`);
+    return { ...manager, limited: true };
+  });
+  const problems = [];
+  const warnings = [];
+  const flags = [];
+  const wrapUpGaps = uncoveredStretches(present, wrapUpStart, end);
+  const gaps = uncoveredStretches(present, start, end);
+  if (!present.length) {
+    problems.push("No lab manager is free during this visit");
+  } else if (wrapUpGaps.length) {
+    problems.push(`No lab manager is free for the wrap-up at the end of the visit (${clockTime(wrapUpStart)}–${clockTime(end)})`);
+  } else if (gaps.length) {
+    warnings.push(`Lab managers can't cover the whole visit (no one is free ${stretchText(gaps)}), though someone is free for the wrap-up at the end`);
+    flags.push("Lab manager gaps");
+  }
+  return { group: { label: "Lab Manager", people }, problems, warnings, flags, notes };
+}
+
+// One part of a visit, plus the lab manager check for the visit as a whole.
+function evaluateVisitPart(iso, appointment, kind, data) {
+  const part = evaluateVisitSlot(iso, appointment[kind], kind, data);
+  const managers = evaluateManagers(managerCandidates(iso, data), visitWindow(appointment));
+  return {
+    ...part,
+    groups: [...part.groups, managers.group],
+    problems: [...part.problems, ...managers.problems],
+    warnings: [...(part.warnings || []), ...managers.warnings],
+    flags: [...(part.flags || []), ...managers.flags],
+    notes: [...(part.notes || []), ...managers.notes],
+  };
+}
+
+// --- Suggested staffing ---
+// Assignments are saved per visit as { date, visitKey, lab: { dryLab, phlebotomy, phlebotomyAt, wetLab, wetLabStart },
+// scan: { lead, support, wanding }, managers: [emails] }, with emails for people and "HH:MM" for times.
+
+function clockOf(minutes) {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function staffedEmails(assignment) {
+  const lab = assignment.lab || {};
+  const scan = assignment.scan || {};
+  return [lab.dryLab, lab.phlebotomy, lab.wetLab, scan.lead, scan.support, scan.wanding, ...(assignment.managers || [])].filter(Boolean);
+}
+
+// How many visits each person is staffing within four weeks either side of a date, so suggestions rotate people fairly.
+function staffingLoads(staffing, iso, exceptKey) {
+  const from = shiftIsoDays(iso, -28);
+  const to = shiftIsoDays(iso, 28);
+  const loads = new Map();
+  for (const doc of staffing) {
+    if (doc.visitKey === exceptKey || doc.date < from || doc.date > to) continue;
+    for (const email of new Set(staffedEmails(doc))) loads.set(email, (loads.get(email) || 0) + 1);
+  }
+  return loads;
+}
+
+function loadOf(loads, people) {
+  return [...new Set(people)].reduce((sum, person) => sum + (loads.get(person.email) || 0), 0);
+}
+
+// The earliest timing that works for this phlebotomist and Wet Lab person, so phlebotomy at the start and Wet Lab
+// straight after whenever they can.
+function labTiming(slot, phlebotomist, wetLabber) {
+  const slotStart = timeToMinutes(slot.start);
+  const slotEnd = timeToMinutes(slot.end);
+  for (let at = slotStart; at + PHLEBOTOMY_MINUTES <= slotEnd; at += TIMING_STEP_MINUTES) {
+    if (!freeBetween(phlebotomist, at, at + PHLEBOTOMY_MINUTES)) continue;
+    const [wetStart] = wetLabStarts(wetLabber, at);
+    if (wetStart !== undefined) return { phlebotomyAt: at, wetStart, standard: at === slotStart && wetStart === slotStart + PHLEBOTOMY_MINUTES };
+  }
+  return null;
+}
+
+// Ranked by phlebotomy level, then by who has the fewest visits nearby, then by the usual timing.
+function labOptions(iso, slot, data, loads, limit = 3) {
+  const people = candidatesOn(iso, data);
+  const dry = withSkill(people, "Dry Lab").filter((person) => freeBetween(person, timeToMinutes(slot.start), timeToMinutes(slot.end)));
+  const phlebotomists = people.filter((person) => phlebotomyLevel(person) >= 0);
+  const wetLabbers = withSkill(people, "Wet Lab");
+  const timings = new Map();
+  const timingFor = (phlebotomist, wetLabber) => {
+    const key = `${phlebotomist.email}|${wetLabber.email}`;
+    if (!timings.has(key)) timings.set(key, labTiming(slot, phlebotomist, wetLabber));
+    return timings.get(key);
+  };
+  const options = [];
+  for (const dryPerson of dry) {
+    for (const phlebotomist of phlebotomists) {
+      for (const wetLabber of wetLabbers) {
+        if (wetLabber === dryPerson) continue;
+        const timing = timingFor(phlebotomist, wetLabber);
+        if (!timing) continue;
+        options.push({
+          dryLab: dryPerson.email,
+          phlebotomy: phlebotomist.email,
+          phlebotomyAt: clockOf(timing.phlebotomyAt),
+          wetLab: wetLabber.email,
+          wetLabStart: clockOf(timing.wetStart),
+          level: phlebotomyLevel(phlebotomist),
+          standard: timing.standard,
+          load: loadOf(loads, [dryPerson, phlebotomist, wetLabber]),
+          names: `${dryPerson.name} ${phlebotomist.name} ${wetLabber.name}`,
+        });
+      }
+    }
+  }
+  options.sort((a, b) => a.level - b.level || a.load - b.load || Number(b.standard) - Number(a.standard) || a.names.localeCompare(b.names));
+  return options.slice(0, limit);
+}
+
+function canLeadScan(person, offHours) {
+  return person.skills.includes("Level 2 Scanning") || (!offHours && person.skills.includes("Level 1 Scanning"));
+}
+
+function isScanner(person) {
+  return ["Level 1 Scanning", "Level 2 Scanning", "Auxiliary Support Scanning"].some((skill) => person.skills.includes(skill));
+}
+
+// Auxiliary Support Scanning only counts alongside someone with Level 2 Scanning.
+function canSupportScan(support, lead) {
+  if (!isScanner(support)) return false;
+  const fullScanner = support.skills.includes("Level 1 Scanning") || support.skills.includes("Level 2 Scanning");
+  return fullScanner || lead.skills.includes("Level 2 Scanning");
+}
+
+// A scanner who can also do wanding/taping is preferred for it, so the scan needs fewer people.
+function scanOptions(iso, slot, data, loads, limit = 3) {
+  const people = candidatesOn(iso, data).filter((person) => freeBetween(person, timeToMinutes(slot.start), timeToMinutes(slot.end)));
+  const offHours = isOffHours(iso, slot.start, slot.end);
+  const wanders = withSkill(people, "Wanding/Taping").sort((a, b) => (loads.get(a.email) || 0) - (loads.get(b.email) || 0) || a.name.localeCompare(b.name));
+  const options = [];
+  for (const lead of people.filter((person) => canLeadScan(person, offHours))) {
+    for (const support of people) {
+      if (support === lead || !canSupportScan(support, lead)) continue;
+      let wanding = null;
+      if (slot.wandingRequired !== false) {
+        wanding = [lead, support].find((person) => person.skills.includes("Wanding/Taping")) || wanders.find((person) => person !== lead && person !== support);
+        if (!wanding) continue;
+      }
+      options.push({
+        lead: lead.email,
+        support: support.email,
+        wanding: wanding ? wanding.email : null,
+        load: loadOf(loads, [lead, support, ...(wanding ? [wanding] : [])]),
+        leadLevel2: lead.skills.includes("Level 2 Scanning"),
+        pair: [lead.email, support.email].sort().join("|"),
+        names: `${lead.name} ${support.name}`,
+      });
+    }
+  }
+  options.sort((a, b) => a.load - b.load || Number(b.leadLevel2) - Number(a.leadLevel2) || a.names.localeCompare(b.names));
+  const seen = new Set();
+  return options.filter((option) => !seen.has(option.pair) && seen.add(option.pair)).slice(0, limit);
+}
+
+// One lab manager for the whole visit if possible, then two who hand off, then just someone for the wrap-up.
+function managerOptions(iso, appointment, data, loads, limit = 3) {
+  const managers = managerCandidates(iso, data);
+  const window = visitWindow(appointment);
+  const covers = (group, from) => !uncoveredStretches(group, from, window.end).length;
+  const byLoad = (a, b) => a.load - b.load || a.names.localeCompare(b.names);
+  const option = (group, coverage) => ({ managers: group.map((manager) => manager.email), coverage, load: loadOf(loads, group), names: group.map((manager) => manager.name).join(" ") });
+  let options = managers.filter((manager) => covers([manager], window.start)).map((manager) => option([manager], "whole"));
+  if (!options.length) {
+    for (const [index, first] of managers.entries()) {
+      for (const second of managers.slice(index + 1)) {
+        if (covers([first, second], window.start)) options.push(option([first, second], "whole"));
+      }
+    }
+  }
+  if (!options.length) options = managers.filter((manager) => covers([manager], window.wrapUpStart)).map((manager) => option([manager], "wrap-up"));
+  return options.sort(byLoad).slice(0, limit);
+}
+
+// Checks a saved or proposed assignment against everyone's current schedules. Issues are things that don't work;
+// warnings can go ahead with care.
+function checkAssignment(iso, appointment, assignment, data) {
+  const people = new Map(candidatesOn(iso, data, () => true).map((person) => [person.email, person]));
+  const issues = [];
+  const warnings = [];
+  const needs = (email, role, cleared, from, to) => {
+    if (!email) {
+      issues.push(`No one is assigned to ${role}`);
+      return null;
+    }
+    const person = people.get(email);
+    if (!person) {
+      issues.push(`${email} (${role}) is no longer on the lab list`);
+      return null;
+    }
+    if (!cleared(person)) issues.push(`${person.name} isn't cleared for ${role}`);
+    if (!freeBetween(person, from, to)) issues.push(`${person.name} isn't free for ${role} (${clockTime(from)}–${clockTime(to)})`);
+    return person;
+  };
+  const has = (skill) => (person) => person.skills.includes(skill);
+
+  if (appointment.lab) {
+    const lab = assignment.lab || {};
+    const slotStart = timeToMinutes(appointment.lab.start);
+    const slotEnd = timeToMinutes(appointment.lab.end);
+    const at = lab.phlebotomyAt ? timeToMinutes(lab.phlebotomyAt) : slotStart;
+    const wetStart = lab.wetLabStart ? timeToMinutes(lab.wetLabStart) : at + PHLEBOTOMY_MINUTES;
+    needs(lab.dryLab, "Dry Lab", has("Dry Lab"), slotStart, slotEnd);
+    const phlebotomist = needs(lab.phlebotomy, "Phlebotomy", (person) => phlebotomyLevel(person) >= 0, at, at + PHLEBOTOMY_MINUTES);
+    needs(lab.wetLab, "Wet Lab", has("Wet Lab"), wetStart, wetStart + WET_LAB_MINUTES);
+    if (at < slotStart || at + PHLEBOTOMY_MINUTES > slotEnd) issues.push("Phlebotomy has to be during the lab portion");
+    if (wetStart < at + PHLEBOTOMY_MINUTES || wetStart > at + PHLEBOTOMY_MINUTES + MAX_GAP_MINUTES) {
+      issues.push("Wet Lab has to start within 30 minutes after phlebotomy ends");
+    }
+    if (lab.dryLab && lab.dryLab === lab.wetLab) issues.push("Wet Lab and Dry Lab must be different people");
+    if (phlebotomist && phlebotomyLevel(phlebotomist) === 2) {
+      issues.push(`${phlebotomist.name} is a Training Phlebotomist: this visit can only go ahead if mobile phlebotomy is booked in advance`);
+    } else if (phlebotomist && phlebotomyLevel(phlebotomist) === 1) {
+      warnings.push(`${phlebotomist.name} isn't an Experienced Phlebotomist: mobile phlebotomy may need to be on stand-by, and if the participant has difficult veins, book mobile phlebotomy in advance`);
+    }
+  }
+
+  if (appointment.scan) {
+    const scan = assignment.scan || {};
+    const from = timeToMinutes(appointment.scan.start);
+    const to = timeToMinutes(appointment.scan.end);
+    const offHours = isOffHours(iso, appointment.scan.start, appointment.scan.end);
+    const lead = needs(scan.lead, "Lead scanner", (person) => canLeadScan(person, offHours), from, to);
+    const support = needs(scan.support, "Support scanner", isScanner, from, to);
+    if (scan.lead && scan.lead === scan.support) issues.push("The two scanners must be different people");
+    if (lead && support && lead !== support && !canSupportScan(support, lead)) {
+      issues.push("Auxiliary Support Scanning must be paired with someone with Level 2 Scanning");
+    }
+    if (offHours && lead && !lead.skills.includes("Level 2 Scanning")) {
+      issues.push("Outside regular hours (weekdays 8 AM–5 PM) the lead scanner needs Level 2 Scanning");
+    }
+    if (appointment.scan.wandingRequired !== false) needs(scan.wanding, "Wanding/Taping", has("Wanding/Taping"), from, to);
+  }
+
+  const window = visitWindow(appointment);
+  const managers = (assignment.managers || []).map((email) => people.get(email)).filter(Boolean);
+  if (!managers.length) {
+    issues.push("No lab manager is assigned");
+  } else if (uncoveredStretches(managers, window.wrapUpStart, window.end).length) {
+    issues.push(`The assigned lab manager${managers.length === 1 ? " isn't" : "s aren't"} free for the wrap-up at the end of the visit (${clockTime(window.wrapUpStart)}–${clockTime(window.end)})`);
+  } else if (uncoveredStretches(managers, window.start, window.end).length) {
+    warnings.push(`The assigned lab manager${managers.length === 1 ? " isn't" : "s aren't"} free ${stretchText(uncoveredStretches(managers, window.start, window.end))}`);
+  }
+  return { issues, warnings };
+}
+
+// Each assigned person's roles on a visit, as [{ email, role, from, to }] with times in minutes.
+function staffRoles(appointment, assignment) {
+  const roles = [];
+  const add = (email, role, from, to) => {
+    if (email) roles.push({ email, role, from, to });
+  };
+  if (appointment.lab && assignment.lab) {
+    const lab = assignment.lab;
+    add(lab.dryLab, "Dry Lab", timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end));
+    const at = timeToMinutes(lab.phlebotomyAt || appointment.lab.start);
+    add(lab.phlebotomy, "Phlebotomy", at, at + PHLEBOTOMY_MINUTES);
+    const wetStart = timeToMinutes(lab.wetLabStart || appointment.lab.start);
+    add(lab.wetLab, "Wet Lab", wetStart, wetStart + WET_LAB_MINUTES);
+  }
+  if (appointment.scan && assignment.scan) {
+    const from = timeToMinutes(appointment.scan.start);
+    const to = timeToMinutes(appointment.scan.end);
+    add(assignment.scan.lead, "Lead scanner", from, to);
+    add(assignment.scan.support, "Support scanner", from, to);
+    add(assignment.scan.wanding, "Wanding/Taping", from, to);
+  }
+  const window = visitWindow(appointment);
+  for (const email of assignment.managers || []) add(email, "Lab manager", window.start, window.end);
+  return roles;
+}
+
+// Who does what and when, as lines for the site and the calendar invites. `nameOf` turns an email into a name.
+function assignmentLines(appointment, assignment, nameOf) {
+  const range = (from, to) => `${clockTime(from)}–${clockTime(to)}`;
+  const lines = { lab: [], scan: [], managers: [] };
+  if (appointment.lab && assignment.lab) {
+    const lab = assignment.lab;
+    if (lab.dryLab) lines.lab.push(`Dry Lab: ${nameOf(lab.dryLab)}, ${range(timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end))}`);
+    if (lab.phlebotomy) {
+      const at = timeToMinutes(lab.phlebotomyAt || appointment.lab.start);
+      lines.lab.push(`Phlebotomy: ${nameOf(lab.phlebotomy)}, ${range(at, at + PHLEBOTOMY_MINUTES)}`);
+    }
+    if (lab.wetLab) {
+      const start = timeToMinutes(lab.wetLabStart || appointment.lab.start);
+      lines.lab.push(`Wet Lab: ${nameOf(lab.wetLab)}, ${range(start, start + WET_LAB_MINUTES)}`);
+    }
+  }
+  if (appointment.scan && assignment.scan) {
+    const scan = assignment.scan;
+    const times = range(timeToMinutes(appointment.scan.start), timeToMinutes(appointment.scan.end));
+    if (scan.lead) lines.scan.push(`Lead scanner: ${nameOf(scan.lead)}, ${times}`);
+    if (scan.support) lines.scan.push(`Support scanner: ${nameOf(scan.support)}, ${times}`);
+    if (scan.wanding) lines.scan.push(`Wanding/Taping: ${nameOf(scan.wanding)}, ${times}`);
+  }
+  if ((assignment.managers || []).length) {
+    const window = visitWindow(appointment);
+    lines.managers.push(`Lab manager: ${assignment.managers.map(nameOf).join(" and ")}, ${range(window.start, window.end)}, including the wrap-up at the end (${range(window.wrapUpStart, window.end)})`);
+  }
+  return lines;
 }

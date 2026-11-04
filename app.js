@@ -59,6 +59,14 @@ let changeRequests = [];
 let appointments = [];
 let staffHolidays = [];
 let calendarView = "unavailability";
+let staffing = [];
+let reviewerContacts = [];
+let bookingFilter = "open";
+let myProfile = null;
+let directory = [];
+let profiles = [];
+// True until someone has filled in their profile the first time they sign in.
+let onboarding = false;
 let weekLayout = { firstHour: 8, lastHour: 18 };
 
 function el(tag, className, text) {
@@ -111,6 +119,11 @@ function shiftIso(iso, count) {
 function formatIso(iso) {
   const [y, month, day] = iso.split("-").map(Number);
   return `${MONTH_NAMES[month - 1].slice(0, 3)} ${day}, ${y}`;
+}
+
+function formatIsoWithDay(iso) {
+  const [y, month, day] = iso.split("-").map(Number);
+  return `${WEEK_NAMES[new Date(y, month - 1, day).getDay()]}, ${formatIso(iso)}`;
 }
 
 function toMinutes(time) {
@@ -167,6 +180,11 @@ const ROLE_LABELS = { reviewer: "Reviewer", grad: "Grad Student/Post-Doc", ra: "
 
 function isGrad() {
   return me && me.role === "grad";
+}
+
+// Reviewers can always book. Anyone else needs the Booking responsibility.
+function isBooker() {
+  return Boolean(me) && (isReviewer() || normalizeSkills(me.skills).includes("Booking"));
 }
 
 function changesNeedReview() {
@@ -378,6 +396,7 @@ function labAllDay(iso) {
     makeClickable(chip, async () => {
       try {
         await Store.deleteAppointment(cancelled.id);
+        pingSync();
         await refresh();
         setCalendarStatus("Visit restored.");
       } catch (error) {
@@ -393,25 +412,96 @@ function shortGroupLabel(label) {
   return label.replace(" Scanners Available", "").replace(" Available", "");
 }
 
+// A day's visits in time order. Default visits only exist up to 60 days ahead.
+function visitsOn(iso) {
+  return appointmentsOn(iso, appointments, staffHolidays, defaultVisitsThrough(new Date()))
+    .sort((a, b) => visitWindow(a).start - visitWindow(b).start);
+}
+
+// When a day has more than one visit, each is numbered, so it's clear which one is being changed or cancelled.
+function visitNumber(iso, appointment) {
+  const visits = visitsOn(iso);
+  return visits.length > 1 ? visits.findIndex((visit) => visitKey(visit) === visitKey(appointment)) + 1 : 0;
+}
+
+function visitTimesText(appointment) {
+  const window = visitWindow(appointment);
+  return `${clockTime(window.start)} – ${clockTime(window.end)}`;
+}
+
+function partsText(appointment) {
+  return ["lab", "scan"].filter((kind) => appointment[kind])
+    .map((kind) => `${kind === "lab" ? "Lab portion" : "Scan"} ${formatTime(appointment[kind].start)} – ${formatTime(appointment[kind].end)}`)
+    .join(" · ");
+}
+
+function unusualNotice(appointment) {
+  const notes = unusualTimes(appointment);
+  if (!notes.length) return [];
+  const box = el("div", "unusual-box");
+  box.append(el("strong", "", `${SEE_TIME} These aren't the usual times:`));
+  for (const note of notes) box.append(el("div", "", note));
+  return [box];
+}
+
+const BOOKING_SHORT = { booked: "Booked", rebooking: "Rebooking", open: "Open" };
+
+function bookingLabel(appointment) {
+  if (appointment.booking === "booked") return `Booked${appointment.bookedByName ? ` by ${appointment.bookedByName}` : ""}`;
+  if (appointment.booking === "rebooking") return "Booking cancelled, open to rebook";
+  return "Open for booking";
+}
+
+// Visits before booking moved to the website were booked the old way, so they don't show a booking status.
+function showsBooking(iso, appointment) {
+  return Boolean(appointment.booking) || iso >= BOOKING_STARTS;
+}
+
+function bookingFields(status) {
+  return { booking: status, bookedBy: me.email, bookedByName: me.name, bookedAt: new Date().toISOString() };
+}
+
+function staffingFor(appointment) {
+  return staffing.find((doc) => doc.visitKey === visitKey(appointment)) || null;
+}
+
 function renderLabColumn(column, iso) {
-  const items = appointmentsOn(iso, appointments, staffHolidays).flatMap((appointment) =>
+  const visits = visitsOn(iso);
+  const items = visits.flatMap((appointment, index) =>
     ["lab", "scan"].filter((kind) => appointment[kind]).map((kind) => ({
       start: appointment[kind].start,
       end: appointment[kind].end,
       appointment,
       kind,
+      number: visits.length > 1 ? index + 1 : 0,
     })));
   for (const { block: item, lane, laneCount } of layoutDay(items)) {
-    const result = evaluateSlot(iso, item.appointment, item.kind);
+    const { appointment } = item;
+    const result = evaluateSlot(iso, appointment, item.kind);
     const state = staffingState(result);
     const node = el("div", `slot slot-${state}`);
     placeBlock(node, item.start, item.end, lane, laneCount);
-    node.append(el("strong", "", SLOT_TITLES[item.kind]), el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`));
+    node.append(
+      el("strong", "", `${item.number ? `Visit ${item.number} · ` : ""}${SLOT_TITLES[item.kind]}`),
+      el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`),
+    );
+    const chips = el("div", "slot-chips");
+    if (unusualTimes(appointment).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
+    if (visitPartsLabel(appointment)) chips.append(el("span", "slot-chip", visitPartsLabel(appointment)));
+    if (showsBooking(iso, appointment)) {
+      chips.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, BOOKING_SHORT[appointment.booking || "open"]));
+    }
+    const doc = staffingFor(appointment);
+    if (doc) {
+      const conflict = checkAssignment(iso, appointment, doc, staffingData()).issues.length > 0;
+      chips.append(el("span", `slot-chip ${conflict ? "chip-conflict" : "chip-staffed"}`, conflict ? "Staffing conflict" : "Staffed"));
+    }
+    if (chips.children.length) node.append(chips);
     if (state === "problem") {
       for (const problem of result.problems) node.append(el("div", "slot-issue", problem));
     } else if (state === "tight") {
       if (result.tight) node.append(el("div", "slot-tight", "Tight timing"));
-      if ((result.warnings || []).length) node.append(el("div", "slot-tight", "No experienced phlebotomist"));
+      for (const flag of result.flags || []) node.append(el("div", "slot-tight", flag));
     } else {
       node.append(el("div", "slot-ok", "Ready to staff"));
     }
@@ -424,10 +514,10 @@ function renderLabColumn(column, iso) {
       start: item.start,
       end: item.end,
       draggable: true,
-      onOpen: () => openSlotDialog(iso, item.appointment, item.kind),
+      onOpen: () => openSlotDialog(iso, appointment, item.kind),
       onCommit: async (start, end) => {
         try {
-          await saveSlot(item.appointment, item.kind, { ...item.appointment[item.kind], start, end });
+          await saveSlot(appointment, item.kind, { ...appointment[item.kind], start, end });
           setCalendarStatus(`${SLOT_TITLES[item.kind]} moved to ${formatTime(start)} – ${formatTime(end)}.`);
         } catch (error) {
           renderWeek();
@@ -450,7 +540,7 @@ function availablePeople(iso, start, end) {
 }
 
 function evaluateSlot(iso, appointment, kind) {
-  return evaluateVisitSlot(iso, appointment[kind], kind, staffingData());
+  return evaluateVisitPart(iso, appointment, kind, staffingData());
 }
 
 // --- Clicking and dragging on the calendar ---
@@ -613,21 +703,45 @@ function openDialog(title, body, actions) {
 }
 
 // Runs an action from a dialog. The dialog closes when it succeeds and stays open with the error when it doesn't.
+async function runDialogAction(button, action) {
+  button.disabled = true;
+  try {
+    const message = await action();
+    dialogEl.close();
+    if (message) setCalendarStatus(message);
+  } catch (error) {
+    setDialogStatus(friendlyError(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function dialogButton(text, className, action) {
   const button = el("button", className, text);
   button.type = "button";
-  button.addEventListener("click", async () => {
-    button.disabled = true;
-    try {
-      const message = await action();
-      dialogEl.close();
-      if (message) setCalendarStatus(message);
-    } catch (error) {
-      setDialogStatus(friendlyError(error), true);
-    } finally {
-      button.disabled = false;
-    }
+  button.addEventListener("click", () => runDialogAction(button, action));
+  return button;
+}
+
+// Asks for a second click before doing something hard to undo, such as cancelling a visit.
+function confirmingButton(text, confirmText, className, action) {
+  const button = el("button", className, text);
+  button.type = "button";
+  let armed = false;
+  button.addEventListener("click", () => {
+    if (armed) return runDialogAction(button, action);
+    armed = true;
+    button.textContent = confirmText;
+    return undefined;
   });
+  return button;
+}
+
+// A dialog button that opens another dialog in its place.
+function switchButton(text, className, open) {
+  const button = el("button", className, text);
+  button.type = "button";
+  button.addEventListener("click", open);
   return button;
 }
 
@@ -875,17 +989,45 @@ function appointmentData(appointment, changes) {
     cancelled: Boolean(merged.cancelled),
     lab: merged.lab || null,
     scan: merged.scan || null,
+    ...(merged.booking
+      ? { booking: merged.booking, bookedBy: merged.bookedBy, bookedByName: merged.bookedByName || "", bookedAt: merged.bookedAt }
+      : {}),
   };
 }
 
+function shiftClock(time, minutes) {
+  return time ? minutesToTime(toMinutes(time) + minutes) : time;
+}
+
+// Moving the lab portion moves its phlebotomy and Wet Lab times with it, so the staffing stays in step.
 async function saveSlot(appointment, kind, slot) {
   await Store.saveAppointment(appointment, appointmentData(appointment, { [kind]: slot }));
+  const doc = staffingFor(appointment);
+  if (doc && kind === "lab" && doc.lab && appointment.lab) {
+    const delta = toMinutes(slot.start) - toMinutes(appointment.lab.start);
+    if (delta) {
+      await Store.saveStaffing(doc.visitKey, {
+        ...withoutId(doc),
+        lab: { ...doc.lab, phlebotomyAt: shiftClock(doc.lab.phlebotomyAt, delta), wetLabStart: shiftClock(doc.lab.wetLabStart, delta) },
+      });
+    }
+  }
+  pingSync();
   await refresh();
 }
 
+async function setBooking(appointment, status) {
+  await Store.bookVisit(appointment, bookingFields(status));
+  pingSync();
+  await refresh();
+}
+
+// Cancelling a visit also removes its staffing, which takes it off the Confirmed Visits calendar.
 async function cancelAppointment(appointment) {
+  if (staffingFor(appointment)) await Store.deleteStaffing(visitKey(appointment));
   if (appointment.defaultFor) await Store.saveAppointment(appointment, appointmentData(appointment, { cancelled: true }));
   else await Store.deleteAppointment(appointment.id);
+  pingSync();
   await refresh();
   return "Visit cancelled.";
 }
@@ -894,6 +1036,9 @@ async function cancelSlot(appointment, kind) {
   const other = kind === "lab" ? "scan" : "lab";
   if (!appointment[other]) return cancelAppointment(appointment);
   await Store.saveAppointment(appointment, appointmentData(appointment, { [kind]: null }));
+  const doc = staffingFor(appointment);
+  if (doc) await Store.saveStaffing(doc.visitKey, { ...withoutId(doc), [kind]: null });
+  pingSync();
   await refresh();
   return `${SLOT_TITLES[kind]} cancelled.`;
 }
@@ -902,7 +1047,13 @@ function openSlotDialog(iso, appointment, kind) {
   const slot = appointment[kind];
   const result = evaluateSlot(iso, appointment, kind);
   const times = timeRange(slot.start, slot.end);
-  const body = [el("p", "muted", formatIso(iso)), times.node];
+  const number = visitNumber(iso, appointment);
+  const parts = visitPartsLabel(appointment);
+  const body = [
+    el("p", "muted", `${formatIsoWithDay(iso)} · ${number ? `Visit ${number}, ` : "Visit "}${visitTimesText(appointment)}${parts ? ` · ${parts}` : ""}`),
+    ...unusualNotice(appointment),
+    times.node,
+  ];
   let wandingBox = null;
   if (kind === "scan") {
     wandingBox = el("input");
@@ -921,18 +1072,19 @@ function openSlotDialog(iso, appointment, kind) {
     issues.append(el("strong", "", "Can't be fully staffed:"));
     for (const problem of result.problems) issues.append(el("div", "", problem));
     body.push(issues);
-  } else if (state === "tight") {
-    if (result.tight) {
-      const tight = el("div", "slot-tight-box");
-      tight.append(el("strong", "", "Tight timing: "), result.timing);
-      body.push(tight);
-    }
+  } else if (state === "tight" && result.tight) {
+    const tight = el("div", "slot-tight-box");
+    tight.append(el("strong", "", "Tight timing: "), result.timing);
+    body.push(tight);
+  }
+  if (state !== "problem") {
     for (const warning of result.warnings || []) {
       const box = el("div", "slot-tight-box");
       box.append(el("strong", "", "Warning: "), warning);
       body.push(box);
     }
-  } else {
+  }
+  if (state === "ready") {
     body.push(el("p", "slot-ok", "Ready to staff: every requirement can be met."));
   }
   for (const group of result.groups) {
@@ -950,53 +1102,702 @@ function openSlotDialog(iso, appointment, kind) {
   if (kind === "lab") {
     body.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people. Without an Experienced Phlebotomist the visit gets a warning, and with only a Training Phlebotomist it needs mobile phlebotomy booked in advance."));
   }
+  body.push(el("p", "muted", "A lab manager needs to be free for the whole visit, handing off if needed, and at the very least for the wrap-up after the scan."));
+  if (showsBooking(iso, appointment)) body.push(bookingSummary(appointment));
+  body.push(staffingSummary(iso, appointment));
 
   const other = kind === "lab" ? "scan" : "lab";
+  const doc = staffingFor(appointment);
   const actions = [
     dialogButton("Save", "primary", async () => {
       await saveSlot(appointment, kind, { ...slot, ...times.read(), ...(wandingBox ? { wandingRequired: wandingBox.checked } : {}) });
       return "Saved.";
     }),
+    switchButton(doc ? "Change staffing" : "Staff this visit", "secondary", () => openStaffingDialog(iso, appointment)),
   ];
+  if (appointment.booking === "booked") {
+    actions.push(dialogButton("Cancel booking", "secondary", async () => {
+      await setBooking(appointment, "rebooking");
+      return "Booking cancelled. The visit stays open for rebooking.";
+    }));
+  } else {
+    actions.push(dialogButton("Mark booked", "secondary", async () => {
+      await setBooking(appointment, "booked");
+      return "Visit marked booked.";
+    }));
+  }
   if (!appointment[other]) {
-    actions.push(dialogButton(`Add ${other === "lab" ? "lab" : "scan"} slot`, "secondary", async () => {
+    actions.push(dialogButton(`Add ${other === "lab" ? "lab portion" : "scan"}`, "secondary", async () => {
       await saveSlot(appointment, other, { ...DEFAULT_SLOTS[other] });
       return `${SLOT_TITLES[other]} added.`;
     }));
   }
+  const which = number ? `visit ${number}` : "this visit";
+  if (appointment[other]) {
+    actions.push(confirmingButton(`Cancel ${kind === "lab" ? "lab portion" : "scan"} only`, "Click again to cancel it", "secondary danger", () => cancelSlot(appointment, kind)));
+  }
   actions.push(
-    dialogButton("Cancel this slot", "secondary danger", () => cancelSlot(appointment, kind)),
-    dialogButton("Cancel whole visit", "secondary danger", () => cancelAppointment(appointment)),
+    confirmingButton(number ? `Cancel visit ${number}` : "Cancel visit", `Click again to cancel ${which}`, "secondary danger", () => cancelAppointment(appointment)),
     closeButton(),
   );
-  openDialog(SLOT_TITLES[kind], body, actions);
+  openDialog(`${number ? `Visit ${number} · ` : ""}${SLOT_TITLES[kind]}`, body, actions);
 }
 
+function openVisitFromLink(key) {
+  const date = key.startsWith("default-") ? key.slice("default-".length) : (appointments.find((appointment) => appointment.id === key) || {}).date;
+  const appointment = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? visitsOn(date).find((visit) => visitKey(visit) === key) : null;
+  if (!appointment) {
+    setCalendarStatus("That visit from the email has been cancelled or isn't on the schedule.", true);
+    return;
+  }
+  const [y, month, day] = date.split("-").map(Number);
+  goTo(new Date(y, month - 1, day));
+  openStaffingDialog(date, appointment);
+}
+
+function bookingSummary(appointment) {
+  const line = el("p", `booking-line booking-${appointment.booking || "open"}`);
+  line.append(el("strong", "", "Booking: "), bookingLabel(appointment));
+  return line;
+}
+
+function staffingSummary(iso, appointment) {
+  const box = el("div", "staffing-summary");
+  box.append(el("h3", "", "Staffing"));
+  const doc = staffingFor(appointment);
+  if (!doc) {
+    box.append(el("p", "muted", "Not staffed yet. Choose Staff this visit to pick from suggested options."));
+    return box;
+  }
+  const lines = assignmentLines(appointment, doc, nameFor);
+  for (const line of [...lines.lab, ...lines.scan, ...lines.managers]) box.append(el("p", "", line));
+  const check = checkAssignment(iso, appointment, doc, staffingData());
+  if (check.issues.length) {
+    const issues = el("div", "slot-issues");
+    issues.append(el("strong", "", "Staffing conflicts:"));
+    for (const issue of check.issues) issues.append(el("div", "", issue));
+    box.append(issues);
+  }
+  for (const warning of check.warnings) box.append(el("p", "notice", warning));
+  box.append(el("p", "muted", `Approved by ${nameFor(doc.approvedBy)}. It's on the Confirmed Visits calendar.`));
+  return box;
+}
+
+// --- Staffing a visit ---
+
+function emptyLab() {
+  return { dryLab: null, phlebotomy: null, phlebotomyAt: null, wetLab: null, wetLabStart: null };
+}
+
+function labFromOption(option) {
+  if (!option) return emptyLab();
+  return { dryLab: option.dryLab, phlebotomy: option.phlebotomy, phlebotomyAt: option.phlebotomyAt, wetLab: option.wetLab, wetLabStart: option.wetLabStart };
+}
+
+function scanFromOption(option) {
+  return option ? { lead: option.lead, support: option.support, wanding: option.wanding } : { lead: null, support: null, wanding: null };
+}
+
+function loadText(count) {
+  return `${count} visit${count === 1 ? "" : "s"} within 4 weeks`;
+}
+
+// Suggestions come first, ranked to rotate people fairly. Any role can then be changed by hand.
+function openStaffingDialog(iso, appointment) {
+  const key = visitKey(appointment);
+  const saved = staffingFor(appointment);
+  const data = staffingData();
+  const loads = staffingLoads(staffing, iso, key);
+  const people = candidatesOn(iso, data, () => true);
+  const byEmail = new Map(people.map((person) => [person.email, person]));
+  const nameOf = (email) => (byEmail.get(email) || { name: email }).name;
+  const window = visitWindow(appointment);
+  const options = {
+    lab: appointment.lab ? labOptions(iso, appointment.lab, data, loads) : [],
+    scan: appointment.scan ? scanOptions(iso, appointment.scan, data, loads) : [],
+    managers: managerOptions(iso, appointment, data, loads),
+  };
+  const draft = {
+    lab: appointment.lab ? { ...(saved && saved.lab ? saved.lab : labFromOption(options.lab[0])) } : null,
+    scan: appointment.scan ? { ...(saved && saved.scan ? saved.scan : scanFromOption(options.scan[0])) } : null,
+    managers: saved ? [...(saved.managers || [])] : [...((options.managers[0] || {}).managers || [])],
+  };
+
+  const freeFor = (from, to) => (person) => freeBetween(person, from, to);
+  const has = (skill) => (person) => person.skills.includes(skill);
+  const labRange = appointment.lab ? [toMinutes(appointment.lab.start), toMinutes(appointment.lab.end)] : [0, 0];
+  const scanRange = appointment.scan ? [toMinutes(appointment.scan.start), toMinutes(appointment.scan.end)] : [0, 0];
+  const offHours = appointment.scan ? isOffHours(iso, appointment.scan.start, appointment.scan.end) : false;
+  const somewhereIn = (from, to) => (person) => freeStretches(person, from, to).length > 0;
+  const candidates = {
+    dryLab: people.filter((person) => has("Dry Lab")(person) && freeFor(...labRange)(person)),
+    phlebotomy: people.filter((person) => phlebotomyLevel(person) >= 0 && somewhereIn(...labRange)(person))
+      .sort((a, b) => phlebotomyLevel(a) - phlebotomyLevel(b)),
+    wetLab: people.filter((person) => has("Wet Lab")(person) && somewhereIn(labRange[0] + PHLEBOTOMY_MINUTES, labRange[1] + WET_LAB_MINUTES)(person)),
+    lead: people.filter((person) => canLeadScan(person, offHours) && freeFor(...scanRange)(person)),
+    support: people.filter((person) => isScanner(person) && freeFor(...scanRange)(person)),
+    wanding: people.filter((person) => has("Wanding/Taping")(person) && freeFor(...scanRange)(person)),
+    managers: people.filter((person) => person.role === "reviewer" && somewhereIn(window.start, window.end)(person)),
+  };
+  const tagOf = (person) => {
+    const level = phlebotomyLevel(person);
+    return level >= 0 ? ` (${PHLEBOTOMY_TAGS[level]})` : "";
+  };
+
+  // A drop-down of people for one role. Someone already chosen who isn't free any more is kept, and marked.
+  const personSelect = (label, value, list, onPick, { showLevel = false, optional = false } = {}) => {
+    const select = el("select");
+    const option = (email, text) => {
+      const node = el("option", "", text);
+      node.value = email;
+      return node;
+    };
+    select.append(option("", optional ? "No one" : "Choose someone"));
+    for (const person of list) {
+      select.append(option(person.email, `${person.name}${showLevel ? tagOf(person) : ""} · ${loadText(loads.get(person.email) || 0)}`));
+    }
+    if (value && !list.some((person) => person.email === value)) select.append(option(value, `${nameOf(value)} (not free)`));
+    select.value = value || "";
+    select.addEventListener("change", () => {
+      onPick(select.value || null);
+      render();
+    });
+    return labeled(label, select);
+  };
+
+  // Changing who does phlebotomy or Wet Lab works out the best timing for the new pair.
+  const retime = () => {
+    const phlebotomist = byEmail.get(draft.lab.phlebotomy);
+    const wetLabber = byEmail.get(draft.lab.wetLab);
+    if (!phlebotomist || !wetLabber) return;
+    const timing = labTiming(appointment.lab, phlebotomist, wetLabber);
+    if (timing) {
+      draft.lab.phlebotomyAt = minutesToTime(timing.phlebotomyAt);
+      draft.lab.wetLabStart = minutesToTime(timing.wetStart);
+    }
+  };
+
+  const optionList = (list, describe, isChosen, choose) => {
+    const node = el("div", "staff-options");
+    if (!list.length) node.append(el("p", "muted", "No complete option works with everyone's schedules. Choose people below to see what's missing."));
+    list.forEach((choice, index) => {
+      const button = el("button", "staff-option");
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(isChosen(choice)));
+      button.append(el("strong", "", index === 0 ? "Suggested" : `Option ${index + 1}`), el("div", "", describe(choice)), el("div", "muted", `${loadText(choice.load)} between them`));
+      button.addEventListener("click", () => {
+        choose(choice);
+        render();
+      });
+      node.append(button);
+    });
+    return node;
+  };
+
+  const render = () => {
+    const body = [
+      el("p", "muted", `${formatIsoWithDay(iso)} · Visit ${visitTimesText(appointment)} · ${partsText(appointment)}`),
+      ...unusualNotice(appointment),
+      el("p", "muted", "Suggestions use the most experienced phlebotomist available, then favor whoever has the fewest visits within four weeks. Pick another option, or change any role below."),
+    ];
+    if (draft.lab) {
+      const section = el("div", "staff-section");
+      section.append(el("h3", "", `Lab portion, ${formatTime(appointment.lab.start)} – ${formatTime(appointment.lab.end)}`));
+      section.append(optionList(options.lab,
+        (choice) => `Dry Lab: ${nameOf(choice.dryLab)} · Phlebotomy: ${nameOf(choice.phlebotomy)}${tagOf(byEmail.get(choice.phlebotomy))} at ${formatTime(choice.phlebotomyAt)} · Wet Lab: ${nameOf(choice.wetLab)} from ${formatTime(choice.wetLabStart)}${choice.standard ? "" : " (tight timing)"}`,
+        (choice) => choice.dryLab === draft.lab.dryLab && choice.phlebotomy === draft.lab.phlebotomy && choice.wetLab === draft.lab.wetLab,
+        (choice) => Object.assign(draft.lab, labFromOption(choice))));
+      const row = el("div", "field-row");
+      row.append(
+        personSelect("Dry Lab", draft.lab.dryLab, candidates.dryLab, (email) => { draft.lab.dryLab = email; }),
+        personSelect("Phlebotomy", draft.lab.phlebotomy, candidates.phlebotomy, (email) => { draft.lab.phlebotomy = email; retime(); }, { showLevel: true }),
+        personSelect("Wet Lab", draft.lab.wetLab, candidates.wetLab, (email) => { draft.lab.wetLab = email; retime(); }),
+      );
+      section.append(row);
+      if (draft.lab.phlebotomyAt) {
+        const at = toMinutes(draft.lab.phlebotomyAt);
+        const wet = toMinutes(draft.lab.wetLabStart);
+        section.append(el("p", "muted", `Phlebotomy ${clockTime(at)} – ${clockTime(at + PHLEBOTOMY_MINUTES)} · Wet Lab ${clockTime(wet)} – ${clockTime(wet + WET_LAB_MINUTES)}`));
+      }
+      body.push(section);
+    }
+    if (draft.scan) {
+      const section = el("div", "staff-section");
+      section.append(el("h3", "", `Scan, ${formatTime(appointment.scan.start)} – ${formatTime(appointment.scan.end)}`));
+      section.append(optionList(options.scan,
+        (choice) => `Lead: ${nameOf(choice.lead)} · Support: ${nameOf(choice.support)}${choice.wanding ? ` · Wanding/Taping: ${nameOf(choice.wanding)}` : ""}`,
+        (choice) => choice.lead === draft.scan.lead && choice.support === draft.scan.support && choice.wanding === draft.scan.wanding,
+        (choice) => Object.assign(draft.scan, scanFromOption(choice))));
+      const row = el("div", "field-row");
+      row.append(
+        personSelect("Lead scanner", draft.scan.lead, candidates.lead, (email) => { draft.scan.lead = email; }),
+        personSelect("Support scanner", draft.scan.support, candidates.support, (email) => { draft.scan.support = email; }),
+      );
+      if (appointment.scan.wandingRequired !== false) {
+        row.append(personSelect("Wanding/Taping", draft.scan.wanding, candidates.wanding, (email) => { draft.scan.wanding = email; }));
+      }
+      section.append(row);
+      body.push(section);
+    }
+    const managerSection = el("div", "staff-section");
+    managerSection.append(el("h3", "", `Lab manager, ${clockTime(window.start)} – ${clockTime(window.end)}`));
+    managerSection.append(optionList(options.managers,
+      (choice) => `${choice.managers.map(nameOf).join(" and ")}${choice.coverage === "whole" ? (choice.managers.length > 1 ? " (handing off)" : " (whole visit)") : " (wrap-up only)"}`,
+      (choice) => choice.managers.join("|") === draft.managers.filter(Boolean).join("|"),
+      (choice) => { draft.managers = [...choice.managers]; }));
+    const managerRow = el("div", "field-row");
+    managerRow.append(
+      personSelect("Lab manager", draft.managers[0], candidates.managers, (email) => { draft.managers = [email, draft.managers[1]].filter(Boolean); }),
+      personSelect("Second lab manager", draft.managers[1], candidates.managers, (email) => { draft.managers = [draft.managers[0], email].filter(Boolean); }, { optional: true }),
+    );
+    managerSection.append(managerRow);
+    body.push(managerSection);
+
+    const check = checkAssignment(iso, appointment, draft, data);
+    if (check.issues.length) {
+      const issues = el("div", "slot-issues");
+      issues.append(el("strong", "", "This staffing has problems:"));
+      for (const issue of check.issues) issues.append(el("div", "", issue));
+      body.push(issues);
+    } else {
+      body.push(el("p", "slot-ok", "Everyone is cleared and free for their role."));
+    }
+    for (const warning of check.warnings) body.push(el("p", "notice", warning));
+
+    const actions = [
+      dialogButton(check.issues.length ? "Approve anyway" : "Approve staffing", "primary", async () => {
+        await Store.saveStaffing(key, {
+          date: iso,
+          visitKey: key,
+          lab: draft.lab,
+          scan: draft.scan,
+          managers: draft.managers.filter(Boolean),
+          approvedBy: me.email,
+          approvedAt: new Date().toISOString(),
+        });
+        pingSync();
+        await refresh();
+        return "Staffing approved. It'll be on the Confirmed Visits calendar within about 10 minutes.";
+      }),
+      switchButton("Back to visit", "secondary", () => openSlotDialog(iso, appointment, appointment.lab ? "lab" : "scan")),
+    ];
+    if (saved) {
+      actions.push(confirmingButton("Remove staffing", "Click again to remove it", "secondary danger", async () => {
+        await Store.deleteStaffing(key);
+        pingSync();
+        await refresh();
+        return "Staffing removed.";
+      }));
+    }
+    actions.push(closeButton());
+    openDialog("Staff this visit", body, actions);
+  };
+  render();
+}
+
+// Reviewers can add a full visit, or one part for participants who only come in for that. They're marked booked
+// unless the reviewer unticks Confirmed booking, for instance to check staffing for a time first.
 function openNewVisitDialog(iso, start, end) {
   const times = timeRange(start, end);
   const choice = el("fieldset", "mode");
-  choice.append(el("legend", "", "Which part of the visit?"));
-  const radios = ["lab", "scan"].map((kind, index) => {
+  choice.append(el("legend", "", "What kind of visit?"));
+  const kinds = [
+    ["full", "Full visit: lab portion, then scan (4 hours from the start)"],
+    ["lab", "Lab portion only"],
+    ["scan", "Scan only"],
+  ];
+  const radios = kinds.map(([value, text], index) => {
     const radio = el("input");
     radio.type = "radio";
     radio.name = "new-visit-kind";
-    radio.value = kind;
+    radio.value = value;
     radio.checked = index === 0;
     const label = el("label");
-    label.append(radio, SLOT_TITLES[kind]);
+    label.append(radio, text);
     choice.append(label);
     return radio;
   });
-  openDialog("Add a participant visit", [el("p", "muted", formatIso(iso)), choice, times.node], [
+  const confirmedBox = el("input");
+  confirmedBox.type = "checkbox";
+  confirmedBox.checked = true;
+  const confirmedLabel = el("label", "check-field");
+  confirmedLabel.append(confirmedBox, "Confirmed booking");
+  const help = el("p", "muted", "For a full visit, only the start time is used: the lab portion runs 2 hours from it and the scan the 2 hours after. Change either part afterwards if needed. Each visit is separate, so cancelling one never cancels another visit on the same day.");
+  openDialog("Add a participant visit", [el("p", "muted", formatIsoWithDay(iso)), choice, times.node, confirmedLabel, help], [
     dialogButton("Add visit", "primary", async () => {
       const kind = radios.find((radio) => radio.checked).value;
-      const slot = { ...times.read(), ...(kind === "scan" ? { wandingRequired: true } : {}) };
-      await Store.saveAppointment({ id: null }, { date: iso, cancelled: false, lab: kind === "lab" ? slot : null, scan: kind === "scan" ? slot : null });
+      const range = times.read();
+      let lab = null;
+      let scan = null;
+      if (kind === "full") {
+        const from = toMinutes(range.start);
+        lab = { start: range.start, end: minutesToTime(from + 120) };
+        scan = { start: minutesToTime(from + 120), end: minutesToTime(from + 240), wandingRequired: true };
+      } else if (kind === "lab") {
+        lab = range;
+      } else {
+        scan = { ...range, wandingRequired: true };
+      }
+      await Store.saveAppointment({ id: null }, { date: iso, cancelled: false, lab, scan, ...(confirmedBox.checked ? bookingFields("booked") : {}) });
+      pingSync();
       await refresh();
-      return "Visit added.";
+      return confirmedBox.checked ? "Visit added and marked booked." : "Visit added. It's open for booking.";
     }),
     closeButton(),
   ]);
+}
+
+// --- Profiles and the lab directory ---
+// Phone numbers go in the directory, which everyone in the lab sees. Birthdays, graduation and favorites go in a
+// profile only the person and the lab managers can see.
+
+// Lab managers keep the directory's names and roles in step with the lab list, including for people added before it.
+async function syncDirectory() {
+  const stale = members.filter((member) => {
+    const entry = directory.find((item) => item.email === member.email);
+    return !entry || entry.name !== member.name || entry.title !== titleOf(member);
+  });
+  await Promise.all(stale.map((member) => Store.saveDirectory(member.email, { name: member.name, title: titleOf(member) })));
+  return stale.length > 0;
+}
+
+function setProfileStatus(text, isError) {
+  const status = document.getElementById("profile-status");
+  status.textContent = text;
+  status.classList.toggle("error", Boolean(isError));
+}
+
+function formatGraduation(graduation) {
+  if (!graduation || graduation === "n/a") return "N/A";
+  const [year, month] = graduation.split("-").map(Number);
+  return `${MONTH_NAMES[month - 1]} ${year}`;
+}
+
+function fillProfileForm() {
+  const monthSelect = document.getElementById("profile-grad-month");
+  const yearSelect = document.getElementById("profile-grad-year");
+  const option = (value, text) => {
+    const node = el("option", "", text);
+    node.value = value;
+    return node;
+  };
+  monthSelect.replaceChildren(option("n/a", "N/A, not a student"), ...MONTH_NAMES.map((name, index) => option(String(index + 1).padStart(2, "0"), name)));
+  const thisYear = new Date().getFullYear();
+  const graduation = myProfile ? myProfile.graduation : "";
+  const years = Array.from({ length: 9 }, (_, index) => String(thisYear + index));
+  if (graduation && graduation !== "n/a" && !years.includes(graduation.slice(0, 4))) years.unshift(graduation.slice(0, 4));
+  yearSelect.replaceChildren(...years.map((year) => option(year, year)));
+  monthSelect.value = graduation && graduation !== "n/a" ? graduation.slice(5) : "n/a";
+  yearSelect.value = graduation && graduation !== "n/a" ? graduation.slice(0, 4) : String(thisYear);
+  yearSelect.disabled = monthSelect.value === "n/a";
+  monthSelect.onchange = () => {
+    yearSelect.disabled = monthSelect.value === "n/a";
+  };
+  const entry = directory.find((item) => item.email === me.email);
+  document.getElementById("profile-phone").value = (entry && entry.phone) || "";
+  document.getElementById("profile-birthday").value = myProfile ? myProfile.birthday : "";
+  document.getElementById("profile-dietary").value = myProfile ? myProfile.dietary : "";
+  document.getElementById("profile-color").value = myProfile ? myProfile.color : "";
+  document.getElementById("profile-dessert").value = myProfile ? myProfile.dessert : "";
+  setProfileStatus("");
+}
+
+function startOnboarding() {
+  onboarding = true;
+  document.getElementById("page-nav").hidden = true;
+  document.getElementById("profile-heading").textContent = `Welcome, ${me.name}`;
+  document.getElementById("profile-intro").textContent = "Before you start, please fill in your profile. You can change any of it later under My Profile.";
+  document.getElementById("save-profile").textContent = "Save and continue";
+  showPage("profile");
+}
+
+async function saveProfileForm() {
+  const value = (id) => document.getElementById(id).value.trim();
+  const phone = value("profile-phone");
+  const birthday = value("profile-birthday");
+  const month = value("profile-grad-month");
+  const dietary = value("profile-dietary");
+  const color = value("profile-color");
+  const dessert = value("profile-dessert");
+  if (!/^[0-9+()\-.\s]{7,30}$/.test(phone)) throw new Error("Please enter your phone number.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthday) || birthday >= dateToIso(startOfDay(new Date()))) throw new Error("Please enter your date of birth.");
+  if (!dietary) throw new Error('Please enter any dietary restrictions or allergies, or "None".');
+  if (!color) throw new Error("Please enter your favorite color.");
+  if (!dessert) throw new Error("Please enter your favorite kind of dessert.");
+  const graduation = month === "n/a" ? "n/a" : `${value("profile-grad-year")}-${month}`;
+  await Store.saveProfile(me.email, { birthday, graduation, color, dessert, dietary, updatedAt: new Date().toISOString() });
+  // A directory entry the lab managers already made only needs the phone number; otherwise it's made here.
+  const entry = directory.find((item) => item.email === me.email);
+  await Store.saveDirectory(me.email, entry ? { phone } : { name: me.name, title: titleOf(me), phone });
+  const first = onboarding;
+  await refresh();
+  if (first) {
+    onboarding = false;
+    document.getElementById("page-nav").hidden = false;
+    document.getElementById("profile-heading").textContent = "My Profile";
+    document.getElementById("profile-intro").textContent = "Keep your details up to date.";
+    document.getElementById("save-profile").textContent = "Save profile";
+    showPage("calendar");
+    return;
+  }
+  setProfileStatus("Saved your profile.");
+}
+
+function tableOf(headings, rows) {
+  const wrapper = el("div", "table-scroll");
+  const table = el("table", "data-table");
+  const head = el("tr");
+  head.append(...headings.map((heading) => el("th", "", heading)));
+  const thead = el("thead");
+  thead.append(head);
+  const tbody = el("tbody");
+  for (const cells of rows) {
+    const row = el("tr");
+    row.append(...cells.map((cell) => {
+      const td = el("td");
+      td.append(cell);
+      return td;
+    }));
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  wrapper.append(table);
+  return wrapper;
+}
+
+function linkTo(href, text) {
+  const link = el("a", "", text);
+  link.href = href;
+  return link;
+}
+
+function renderDirectory() {
+  if (!me) return;
+  const people = [...directory].sort((a, b) => a.name.localeCompare(b.name));
+  document.getElementById("directory-list").replaceChildren(people.length
+    ? tableOf(["Name", "Role", "Email", "Phone"], people.map((person) => [
+      person.name,
+      person.title,
+      linkTo(`mailto:${person.email}`, person.email),
+      person.phone ? linkTo(`tel:${person.phone.replace(/[^0-9+]/g, "")}`, person.phone) : "Not added yet",
+    ]))
+    : el("p", "muted", "No one is in the directory yet."));
+  const details = document.getElementById("manager-details");
+  details.hidden = !isReviewer();
+  if (!isReviewer()) return;
+  const rows = [...members].sort((a, b) => a.name.localeCompare(b.name)).map((member) => {
+    const profile = profiles.find((item) => item.email === member.email);
+    if (!profile) return [member.name, "Hasn't filled in their profile yet", "", "", "", ""];
+    return [member.name, formatIso(profile.birthday), formatGraduation(profile.graduation), profile.color, profile.dessert, profile.dietary];
+  });
+  document.getElementById("manager-details-list").replaceChildren(
+    tableOf(["Name", "Birthday", "Expected graduation", "Favorite color", "Favorite dessert", "Dietary restrictions/allergies"], rows));
+}
+
+// --- Who's available ---
+// Lets lab managers check anyone's availability at any time, by role, and test times as a visit.
+
+const CHECK_ROLES = [
+  ["Lab managers", (person) => person.role === "reviewer"],
+  ...["Dry Lab", "Wet Lab", ...PHLEBOTOMY_LEVELS, "Level 2 Scanning", "Level 1 Scanning", "Auxiliary Support Scanning", "Wanding/Taping"]
+    .map((skill) => [skill, (person) => person.skills.includes(skill)]),
+];
+
+function checkPartBox(title, result) {
+  const state = staffingState(result);
+  const box = el("div", state === "problem" ? "slot-issues" : state === "tight" ? "slot-tight-box" : "check-ok");
+  box.append(el("strong", "", `${title}: ${state === "problem" ? "can't be fully staffed" : state === "tight" ? "can be staffed, with care" : "ready to staff"}`));
+  for (const problem of result.problems) box.append(el("div", "", problem));
+  if (result.tight) box.append(el("div", "", `Tight timing: ${result.timing}`));
+  for (const warning of result.warnings || []) box.append(el("div", "", `Warning: ${warning}`));
+  return box;
+}
+
+function renderAvailabilityCheck() {
+  if (!isReviewer()) return;
+  const dateInput = document.getElementById("check-date");
+  if (!dateInput.value) dateInput.value = dateToIso(startOfDay(new Date()));
+  const iso = dateInput.value;
+  const start = document.getElementById("check-start").value;
+  const end = document.getElementById("check-end").value;
+  const kind = document.getElementById("check-kind").value;
+  const out = document.getElementById("check-results");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || !validTime(start) || (kind !== "full" && (!validTime(end) || end <= start))) {
+    out.replaceChildren(el("p", "muted", "Pick a date and a start time, with an end time after it."));
+    return;
+  }
+  const data = staffingData();
+  const nodes = [el("h3", "", `${formatIsoWithDay(iso)}, ${formatTime(start)}${kind === "full" ? "" : ` – ${formatTime(end)}`}`)];
+  const holiday = staffHolidayOn(iso, staffHolidays);
+  if (holiday) nodes.push(el("p", "notice", `${holiday.name} is a USC staff holiday, so there are no visits that day.`));
+  let from = toMinutes(start);
+  let to = kind === "full" ? from + VISIT_MINUTES : toMinutes(end);
+  if (kind !== "any") {
+    const later = (minutes) => minutesToTime(from + minutes);
+    const appointment = kind === "full"
+      ? { lab: { start, end: later(120) }, scan: { start: later(120), end: later(240), wandingRequired: true } }
+      : kind === "lab" ? { lab: { start, end }, scan: null } : { lab: null, scan: { start, end, wandingRequired: true } };
+    const window = visitWindow(appointment);
+    [from, to] = [window.start, window.end];
+    if (kind === "full") nodes.push(el("p", "muted", `A full visit runs 4 hours, ${clockTime(from)} – ${clockTime(to)}: the lab portion for the first 2 hours and the scan for the next 2. Until isn't used.`));
+    for (const part of ["lab", "scan"].filter((name) => appointment[name])) {
+      const slot = appointment[part];
+      nodes.push(checkPartBox(`${part === "lab" ? "Lab portion" : "Scan"}, ${formatTime(slot.start)} – ${formatTime(slot.end)}`, evaluateVisitPart(iso, appointment, part, data)));
+    }
+  }
+  const people = candidatesOn(iso, data, () => true);
+  const list = el("div", "check-roles");
+  for (const [label, hasRole] of CHECK_ROLES) {
+    const withRole = people.filter(hasRole);
+    const whole = withRole.filter((person) => freeBetween(person, from, to));
+    const part = withRole.filter((person) => !whole.includes(person) && freeStretches(person, from, to).length);
+    const row = el("div", "check-role");
+    row.append(el("strong", "", label));
+    row.append(el("div", whole.length ? "" : "muted", whole.length ? `Free the whole time: ${whole.map((person) => person.name).join(", ")}` : "No one free the whole time"));
+    if (part.length) row.append(el("div", "muted", `Free part of the time: ${part.map((person) => `${person.name} (${freeStretches(person, from, to).join(", ")})`).join("; ")}`));
+    list.append(row);
+  }
+  nodes.push(list);
+  out.replaceChildren(...nodes);
+}
+
+// --- Booking ---
+// Bookers see visits and whether they're booked, never who is staffing them. Participant details never go
+// through this site: bookers email them to reviewers from their own USC email instead.
+
+function bookableVisits() {
+  const through = defaultVisitsThrough(new Date());
+  const first = [dateToIso(startOfDay(new Date())), BOOKING_STARTS].sort()[1];
+  const list = [];
+  for (let iso = first; iso <= through; iso = shiftIso(iso, 1)) {
+    for (const appointment of visitsOn(iso)) list.push({ iso, appointment });
+  }
+  // Extra visits reviewers have added further ahead.
+  for (const appointment of appointments) {
+    if (!appointment.defaultFor && appointment.date > through) list.push({ iso: appointment.date, appointment });
+  }
+  return list.sort((a, b) => a.iso.localeCompare(b.iso) || visitWindow(a.appointment).start - visitWindow(b.appointment).start);
+}
+
+const PUBLISHED_SITE = "https://dbelkind.github.io/lab-schedules/";
+
+// A link that opens a visit's staffing on the site, for reviewers.
+function visitLink(appointment) {
+  const here = window.location && window.location.origin && window.location.origin !== "null"
+    ? `${window.location.origin}${window.location.pathname}`
+    : PUBLISHED_SITE;
+  return `${here}#visit=${visitKey(appointment)}`;
+}
+
+// The booker's email to the reviewers, sent from their own USC account. The booker types the Screener ID in, so
+// participant information only ever travels by email and goes on the lab's own Google Calendar, never this site.
+// Cancelled bookings aren't emailed this way: the Apps Script emails lab managers about them automatically.
+function bookingEmailUrl(iso, appointment) {
+  const to = reviewerContacts.map((reviewer) => reviewer.email).join(",");
+  const when = `${formatIsoWithDay(iso)}, ${visitTimesText(appointment)}`;
+  const seeTime = unusualTimes(appointment);
+  const visitLines = [
+    `Visit: ${when}`,
+    partsText(appointment),
+    ...(seeTime.length ? [`${SEE_TIME} These aren't the usual times:`, ...seeTime.map((note) => `- ${note}`)] : []),
+  ];
+  const subject = `Booked: ${when}${seeTime.length ? ` ${SEE_TIME}` : ""}`;
+  const body = [
+    "A participant is booked for this visit.", "", ...visitLines, "", "Screener ID: ", "",
+    "For reviewers:",
+    "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab schedule website.",
+    `2. Review the suggested staffing and approve it to confirm the visit: ${visitLink(appointment)}`,
+    "   Approving the staffing sends the staff their calendar invites and emails automatically.",
+  ];
+  return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body.join("\n"))}`;
+}
+
+function bookingEmailLink(iso, appointment) {
+  const link = el("a", "secondary small button-link", "Email booking details to reviewers");
+  link.href = bookingEmailUrl(iso, appointment);
+  return link;
+}
+
+// Opens a drafted email in the booker's email app. If nothing opens, the button on the visit does the same.
+function openEmailDraft(url) {
+  if (window.location && typeof window.location.assign === "function") window.location.assign(url);
+}
+
+// Asks the Apps Script to update LCL Visits and send any cancellation emails now, rather than at its next 10-minute
+// run. Nothing is sent with it, and if it fails the 10-minute run catches up.
+function pingSync() {
+  if (typeof SYNC_URL === "undefined" || !SYNC_URL || typeof fetch !== "function") return;
+  fetch(SYNC_URL, { method: "POST", mode: "no-cors" }).catch(() => {});
+}
+
+function setBookingStatus(text, isError) {
+  const status = document.getElementById("booking-status");
+  status.textContent = text;
+  status.classList.toggle("error", Boolean(isError));
+}
+
+function bookingCard(iso, appointment) {
+  const card = el("div", `booking-card booking-${appointment.booking || "open"}`);
+  const main = el("div", "booking-main");
+  const number = visitNumber(iso, appointment);
+  main.append(
+    el("strong", "", `${number ? `Visit ${number}: ` : ""}${visitTimesText(appointment)}`),
+    el("div", "muted", `${partsText(appointment)}${visitPartsLabel(appointment) ? ` · ${visitPartsLabel(appointment)}` : ""}`),
+  );
+  for (const note of unusualTimes(appointment)) main.append(el("div", "booking-unusual", `${SEE_TIME} ${note}`));
+  main.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, bookingLabel(appointment)));
+  const actions = el("div", "booking-actions");
+  const act = (text, className, status, done) => {
+    const button = el("button", className, text);
+    button.type = "button";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await setBooking(appointment, status);
+        setBookingStatus(done);
+        if (status === "booked") openEmailDraft(bookingEmailUrl(iso, appointment));
+      } catch (error) {
+        setBookingStatus(friendlyError(error), true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    return button;
+  };
+  if (appointment.booking === "booked") {
+    actions.append(bookingEmailLink(iso, appointment),
+      act("Cancel booking", "secondary small", "rebooking", "Booking cancelled. The visit stays open so it can be rebooked, and the lab managers are emailed automatically."));
+  } else {
+    actions.append(act(appointment.booking === "rebooking" ? "Book again" : "Mark booked", "primary small", "booked",
+      "Visit booked. An email to the reviewers has opened: add the Screener ID and send it. If it didn't open, use Email booking details to reviewers."));
+  }
+  card.append(main, actions);
+  return card;
+}
+
+function renderBookingPage() {
+  if (!isBooker()) return;
+  for (const button of document.querySelectorAll("[data-booking-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.bookingFilter === bookingFilter));
+  }
+  const wanted = ({ appointment }) => bookingFilter === "all"
+    || (bookingFilter === "booked" ? appointment.booking === "booked" : appointment.booking !== "booked");
+  const visits = bookableVisits().filter(wanted);
+  const listEl = document.getElementById("booking-list");
+  if (!visits.length) {
+    listEl.replaceChildren(el("p", "muted", `No ${bookingFilter === "all" ? "" : `${bookingFilter} `}visits right now. Visits from ${formatIso(BOOKING_STARTS)} on are booked here, and a new day opens at 8:00 AM each morning, 60 days ahead.`));
+    return;
+  }
+  const nodes = [];
+  let day = "";
+  for (const { iso, appointment } of visits) {
+    if (iso !== day) {
+      day = iso;
+      nodes.push(el("h3", "booking-day", formatIsoWithDay(iso)));
+    }
+    nodes.push(bookingCard(iso, appointment));
+  }
+  listEl.replaceChildren(...nodes);
 }
 
 function setCalendarView(view) {
@@ -1009,7 +1810,7 @@ function setCalendarView(view) {
     ? "Participant visit staffing"
     : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
   document.getElementById("calendar-hint").textContent = lab
-    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing or have no experienced phlebotomist. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
+    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
     : "Each block is a time someone can't be in the lab. Open time is when they're available. Click your own blocks to change them, or drag on empty space to add a time.";
   setCalendarStatus("");
   renderFilters();
@@ -1062,6 +1863,9 @@ function render() {
   renderMyEntries();
   renderReviewList();
   renderMemberList();
+  renderBookingPage();
+  renderAvailabilityCheck();
+  renderDirectory();
 }
 
 // --- Reading an uploaded schedule ---
@@ -1693,6 +2497,7 @@ function skillPicker(selectedSkills, { trackChanges = false, onChange = () => {}
   addGroup("Cleared for", SKILLS.filter((skill) => !PHLEBOTOMY_LEVELS.includes(skill)));
   addGroup("Phlebotomy level", PHLEBOTOMY_LEVELS, true);
   addGroup("Also trained in", SECONDARY_SKILLS);
+  addGroup("Responsibilities", RESPONSIBILITIES);
   return { node, read: () => boxes.filter((box) => box.checked).map((box) => box.value) };
 }
 
@@ -1703,32 +2508,66 @@ function memberData(member, changes = {}) {
     role: member.role,
     skills: member.skills || [],
     ...(member.notify !== undefined ? { notify: member.notify } : {}),
+    ...(member.emails ? { emails: member.emails } : {}),
+    ...(member.title ? { title: member.title } : {}),
     ...changes,
   };
 }
 
-function notifySwitch(self) {
+// Each kind of reviewer email has its own switch, saved as soon as it's changed.
+function emailSettings(self) {
   const wrapper = el("div", "notify-setting");
-  const label = el("label", "check-field");
-  const box = el("input");
-  box.type = "checkbox";
-  box.checked = self.notify !== false;
-  box.addEventListener("change", async () => {
-    box.disabled = true;
+  wrapper.append(el("h3", "", "Email alerts"));
+  for (const { key, label: text, help } of REVIEWER_EMAILS) {
+    const label = el("label", "check-field");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = wantsEmail(self, key);
+    box.addEventListener("change", async () => {
+      box.disabled = true;
+      const emails = Object.fromEntries(REVIEWER_EMAILS.map((kind) => [kind.key, kind.key === key ? box.checked : wantsEmail(self, kind.key)]));
+      try {
+        await Store.saveMember(self.email, memberData(self, { emails }));
+        await refresh();
+        setStatus(box.checked ? `You'll get "${text}" emails.` : `You won't get "${text}" emails.`);
+      } catch (error) {
+        box.checked = !box.checked;
+        setStatus(friendlyError(error), true);
+      } finally {
+        box.disabled = false;
+      }
+    });
+    label.append(box, text);
+    wrapper.append(label, el("p", "muted", help));
+  }
+  wrapper.append(el("p", "muted", "When you're staffing a visit, its calendar invite and updates come regardless, like everyone else's."));
+  return wrapper;
+}
+
+// The label shown in the lab directory, separate from what someone can do on the site.
+function titleSelect(member) {
+  const select = el("select", "role-select");
+  select.setAttribute("aria-label", `${member.name}'s directory role`);
+  for (const title of DIRECTORY_TITLES) {
+    const option = el("option", "", title);
+    option.value = title;
+    select.append(option);
+  }
+  select.value = titleOf(member);
+  select.addEventListener("change", async () => {
+    select.disabled = true;
     try {
-      await Store.saveMember(self.email, memberData(self, { notify: box.checked }));
+      await Store.saveMember(member.email, memberData(member, { title: select.value }));
       await refresh();
-      setStatus(box.checked ? "You'll get an email when requests need review." : "You won't get emails about requests.");
+      setStatus(`${member.name} is listed as ${select.value} in the directory.`);
     } catch (error) {
-      box.checked = !box.checked;
+      select.value = titleOf(member);
       setStatus(friendlyError(error), true);
     } finally {
-      box.disabled = false;
+      select.disabled = false;
     }
   });
-  label.append(box, "Email me when requests need review");
-  wrapper.append(label, el("p", "muted", "New time off requests and schedule changes are emailed within about 10 minutes, once per request. Your own requests aren't emailed to you."));
-  return wrapper;
+  return select;
 }
 
 function memberRow(member) {
@@ -1748,7 +2587,7 @@ function memberRow(member) {
   };
   const skills = skillPicker(member.skills, { trackChanges: true, onChange: showChanged });
   showChanged(false);
-  const buttons = [unsavedNote, save];
+  const buttons = [labeled("Directory role", titleSelect(member)), unsavedNote, save];
   if (!own) {
     buttons.push(actionButton("Edit schedule", async () => {
       setActingFor(member.email);
@@ -1887,10 +2726,20 @@ function renderMemberList() {
     renderShownMembers(others);
   }
   const self = members.find((member) => member.email === me.email);
-  document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self), notifySwitch(self)] : []));
+  document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self), emailSettings(self)] : []));
 }
 
 let newMemberSkills = null;
+
+function renderNewMemberTitle() {
+  const select = document.getElementById("new-member-title");
+  select.replaceChildren(...DIRECTORY_TITLES.map((title) => {
+    const option = el("option", "", title);
+    option.value = title;
+    return option;
+  }));
+  select.value = titleOf({ role: document.getElementById("new-member-role").value });
+}
 
 function renderNewMemberSkills() {
   newMemberSkills = skillPicker([]);
@@ -1904,7 +2753,12 @@ async function addMember() {
   const name = nameInput.value.trim();
   if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new Error("Please enter their USC email.");
   if (!name) throw new Error("Please enter their name.");
-  await Store.saveMember(email, { name, role: document.getElementById("new-member-role").value, skills: newMemberSkills.read() });
+  await Store.saveMember(email, {
+    name,
+    role: document.getElementById("new-member-role").value,
+    title: document.getElementById("new-member-title").value,
+    skills: newMemberSkills.read(),
+  });
   shownMembers.add(email);
   emailEl.value = "";
   nameInput.value = "";
@@ -2008,18 +2862,29 @@ function buildBlocks() {
 // Only reviewers ask for everyone's entries. For anyone else the database refuses that request.
 async function refresh() {
   const scope = isReviewer() ? undefined : me.email;
-  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments] = await Promise.all([
+  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments, loadedStaffing, contacts, profile, loadedDirectory, loadedProfiles] = await Promise.all([
     isReviewer() ? Store.listMembers() : [me],
     Store.listAvailability(scope),
     Store.listTimeOff(scope),
     Store.listChangeRequests(scope),
-    isReviewer() ? Store.listAppointments() : [],
+    isBooker() ? Store.listAppointments() : [],
+    isReviewer() ? Store.listStaffing() : [],
+    isBooker() && !isReviewer() ? Store.listReviewers() : [],
+    Store.getProfile(me.email),
+    Store.listDirectory(),
+    isReviewer() ? Store.listProfiles() : [],
   ]);
   members = people.map((member, index) => ({ ...member, skills: normalizeSkills(member.skills), color: COLORS[index % COLORS.length] }));
   availability = loadedAvailability;
   timeOff = loadedTimeOff;
   changeRequests = loadedChanges;
   appointments = loadedAppointments;
+  staffing = loadedStaffing;
+  reviewerContacts = isReviewer() ? members.filter((member) => member.role === "reviewer") : contacts;
+  myProfile = profile;
+  directory = loadedDirectory;
+  profiles = loadedProfiles;
+  if (isReviewer() && await syncDirectory()) directory = await Store.listDirectory();
   blocks = buildBlocks();
   render();
 }
@@ -2060,6 +2925,10 @@ function showPage(page) {
   document.getElementById("page-calendar").hidden = page !== "calendar";
   document.getElementById("page-update").hidden = page !== "update";
   document.getElementById("page-manage").hidden = page !== "manage";
+  document.getElementById("page-booking").hidden = page !== "booking";
+  document.getElementById("page-profile").hidden = page !== "profile";
+  document.getElementById("page-directory").hidden = page !== "directory";
+  if (page === "profile") fillProfileForm();
   for (const link of document.querySelectorAll(".page-link")) {
     if (link.dataset.page === page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -2081,6 +2950,13 @@ async function handleAuthChange(user) {
   timeOff = [];
   changeRequests = [];
   appointments = [];
+  staffing = [];
+  reviewerContacts = [];
+  myProfile = null;
+  directory = [];
+  profiles = [];
+  onboarding = false;
+  bookingFilter = "open";
   blocks = [];
   actingFor = null;
   shownMembers = new Set();
@@ -2104,11 +2980,15 @@ async function handleAuthChange(user) {
     }
     me = member;
     document.getElementById("manage-link").hidden = !isReviewer();
+    document.getElementById("booking-link").hidden = !isBooker();
     document.getElementById("view-switch").hidden = !isReviewer();
     document.getElementById("ooo-help").textContent = ownTimeOffNeedsReview()
       ? "Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it."
       : "Add time you won't be in the lab, either whole days or part of a single day. It's saved straight away, and reviewers are emailed about it.";
-    if (isReviewer()) renderNewMemberSkills();
+    if (isReviewer()) {
+      renderNewMemberSkills();
+      renderNewMemberTitle();
+    }
     showScreen("app");
     await refresh();
     setCalendarView(isReviewer() ? "lab" : "unavailability");
@@ -2116,9 +2996,18 @@ async function handleAuthChange(user) {
       (timeOff.some((request) => request.status === "pending") || changeRequests.some((request) => request.status === "pending"));
     showTab("class");
     showManageTab("review");
-    // Links in request emails end in #review, which opens Review requests.
-    const fromEmail = isReviewer() && (window.location || {}).hash === "#review";
-    showPage(hasPending || fromEmail ? "manage" : "calendar");
+    // Links in request emails end in #review, which opens Review requests. Links in booking emails end in
+    // #visit=<key>, which opens that visit's staffing.
+    const hash = (window.location || {}).hash || "";
+    const fromEmail = isReviewer() && hash === "#review";
+    const visitFromEmail = isReviewer() && hash.startsWith("#visit=") ? decodeURIComponent(hash.slice(7)) : "";
+    // The first time someone signs in, they fill in their profile before anything else.
+    if (!myProfile) {
+      startOnboarding();
+      return;
+    }
+    showPage((hasPending || fromEmail) && !visitFromEmail ? "manage" : "calendar");
+    if (visitFromEmail) openVisitFromLink(visitFromEmail);
   } catch (error) {
     showMessage(`Couldn't load your unavailable times (${friendlyError(error)}).`);
   }
@@ -2165,6 +3054,29 @@ function wireUpEvents() {
   }
   for (const button of document.querySelectorAll(".manage-tab")) {
     button.addEventListener("click", () => showManageTab(button.dataset.manage));
+  }
+  // A new person's directory role follows their site role until it's changed.
+  document.getElementById("new-member-role").addEventListener("change", renderNewMemberTitle);
+  document.getElementById("save-profile").addEventListener("click", async () => {
+    const button = document.getElementById("save-profile");
+    button.disabled = true;
+    try {
+      await saveProfileForm();
+    } catch (error) {
+      setProfileStatus(friendlyError(error), true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  for (const id of ["check-date", "check-start", "check-end", "check-kind"]) {
+    document.getElementById(id).addEventListener("change", renderAvailabilityCheck);
+  }
+  for (const button of document.querySelectorAll("[data-booking-filter]")) {
+    button.addEventListener("click", () => {
+      bookingFilter = button.dataset.bookingFilter;
+      setBookingStatus("");
+      renderBookingPage();
+    });
   }
   document.getElementById("dialog-close").addEventListener("click", () => dialogEl.close());
   document.addEventListener("click", closeMemberPicker);

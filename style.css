@@ -114,7 +114,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: none;
 .primary:disabled { opacity: 0.6; cursor: default; }
 .secondary { border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); }
 .secondary:hover { border-color: var(--muted); }
-.secondary.small { height: 32px; padding: 0 12px; font-size: 13px; }
+.secondary.small, .primary.small { height: 32px; padding: 0 12px; font-size: 13px; }
 
 .link-button {
   padding: 4px 0;
@@ -778,3 +778,62 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .role-badge.role-ra { background: var(--surface-muted); color: #475553; }
 .member-card-top .field { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
 .role-select { height: 32px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: var(--surface); font: inherit; font-size: 13px; }
+
+/* Visit chips on the Lab Events calendar */
+.slot-chips { display: flex; flex-wrap: wrap; gap: 3px; margin: 2px 0; }
+.slot-chip { display: inline-block; padding: 1px 6px; border-radius: 999px; background: var(--surface-muted); color: var(--muted); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.chip-unusual { background: #fde68a; color: #7c2d12; }
+.chip-booked { background: var(--accent-soft); color: #0b5a54; }
+.chip-rebooking { background: #ffedd5; color: #9a3412; }
+.chip-open { background: var(--surface-muted); color: var(--muted); }
+.chip-staffed { background: #dcfce7; color: #166534; }
+.chip-conflict { background: #fee2e2; color: #991b1b; }
+
+.unusual-box { margin: 10px 0; padding: 10px 14px; border: 1px solid #f59e0b; border-radius: var(--radius-small); background: #fffbeb; color: #7c2d12; }
+.unusual-box strong { display: block; margin-bottom: 2px; }
+
+.booking-line { margin: 12px 0 0; }
+.staffing-summary { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.staffing-summary h3 { margin: 0 0 4px; font-size: 13px; }
+.staffing-summary p { margin: 2px 0; }
+
+/* Staffing dialog */
+.staff-section { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.staff-section h3 { margin: 0 0 8px; font-size: 14px; }
+.staff-options { display: grid; gap: 6px; margin-bottom: 8px; }
+.staff-option { padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.staff-option:hover { border-color: var(--accent); }
+.staff-option[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.staff-option .muted { font-size: 12px; }
+
+/* Booking page */
+.booking-filter { margin: 12px 0 4px; }
+.booking-day { margin: 18px 0 6px; font-size: 14px; }
+.booking-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--radius-small); background: var(--surface); }
+.booking-card.booking-booked { border-left-color: var(--accent); }
+.booking-card.booking-rebooking { border-left-color: #ea580c; }
+.booking-main { display: grid; gap: 3px; min-width: 0; }
+.booking-main .slot-chip { justify-self: start; }
+.booking-unusual { color: #9a3412; font-size: 13px; font-weight: 600; }
+.booking-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-link { display: inline-flex; align-items: center; text-decoration: none; }
+
+.notify-setting h3 { margin: 0 0 4px; font-size: 14px; }
+.notify-setting .check-field { margin: 12px 0 0; }
+.notify-setting p { margin: 2px 0 0 26px; }
+.notify-setting > p:last-child { margin: 14px 0 0; }
+
+/* Who's available */
+.check-roles { display: grid; gap: 8px; margin-top: 12px; }
+.check-role { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); font-size: 14px; }
+.check-role strong { display: block; margin-bottom: 2px; }
+.check-ok { margin: 10px 0; padding: 10px 14px; border: 1px solid #86efac; border-radius: var(--radius-small); background: #f0fdf4; color: #166534; }
+#check-results .check-ok strong, #check-results .slot-tight-box strong, #check-results .slot-issues strong { display: block; }
+
+/* Directory tables */
+.table-scroll { overflow-x: auto; margin: 12px 0 20px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); }
+.data-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.data-table th, .data-table td { padding: 10px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.data-table th { background: var(--surface-muted); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.data-table tr:last-child td { border-bottom: 0; }
+.data-table a { color: var(--accent); }
