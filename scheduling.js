@@ -709,6 +709,29 @@ function checkAssignment(iso, appointment, assignment, data) {
   return { issues, warnings };
 }
 
+// The email a booker sends the reviewers from their own USC account when they book a visit, with a blank Screener ID
+// line for them to fill in. `when` is the visit's day and times, `parts` its lab and scan times, `seeTime` any unusual
+// times, and `link` its staffing on the site. The site drafts it; the Apps Script sends a sample in its test emails.
+function bookingEmail({ when, parts, seeTime, link }) {
+  return {
+    subject: `Booked: ${when}${seeTime.length ? ` ${SEE_TIME}` : ""}`,
+    body: [
+      "A participant is booked for this visit.",
+      "",
+      `Visit: ${when}`,
+      parts,
+      ...(seeTime.length ? [`${SEE_TIME} These aren't the usual times:`, ...seeTime.map((note) => `- ${note}`)] : []),
+      "",
+      "Screener ID: ",
+      "",
+      "For reviewers:",
+      "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab schedule website.",
+      `2. Review the suggested staffing and approve it to confirm the visit: ${link}`,
+      "   Approving the staffing sends the staff their calendar invites and emails automatically.",
+    ].join("\n"),
+  };
+}
+
 // Each assigned person's roles on a visit, as [{ email, role, from, to }] with times in minutes.
 function staffRoles(appointment, assignment) {
   const roles = [];

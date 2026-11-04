@@ -1694,22 +1694,13 @@ function visitLink(appointment) {
 // Cancelled bookings aren't emailed this way: the Apps Script emails lab managers about them automatically.
 function bookingEmailUrl(iso, appointment) {
   const to = reviewerContacts.map((reviewer) => reviewer.email).join(",");
-  const when = `${formatIsoWithDay(iso)}, ${visitTimesText(appointment)}`;
-  const seeTime = unusualTimes(appointment);
-  const visitLines = [
-    `Visit: ${when}`,
-    partsText(appointment),
-    ...(seeTime.length ? [`${SEE_TIME} These aren't the usual times:`, ...seeTime.map((note) => `- ${note}`)] : []),
-  ];
-  const subject = `Booked: ${when}${seeTime.length ? ` ${SEE_TIME}` : ""}`;
-  const body = [
-    "A participant is booked for this visit.", "", ...visitLines, "", "Screener ID: ", "",
-    "For reviewers:",
-    "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab schedule website.",
-    `2. Review the suggested staffing and approve it to confirm the visit: ${visitLink(appointment)}`,
-    "   Approving the staffing sends the staff their calendar invites and emails automatically.",
-  ];
-  return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body.join("\n"))}`;
+  const { subject, body } = bookingEmail({
+    when: `${formatIsoWithDay(iso)}, ${visitTimesText(appointment)}`,
+    parts: partsText(appointment),
+    seeTime: unusualTimes(appointment),
+    link: visitLink(appointment),
+  });
+  return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
 function bookingEmailLink(iso, appointment) {

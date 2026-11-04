@@ -27,6 +27,8 @@ const CONFIG = {
   // aren't emailed. Only reviewers get emails. Set it to true to add staff as guests and email them about their visits.
   // Google itself never emails guests: the script sends each person their own email instead.
   inviteStaff: false,
+  // Where sendTestEmails sends its samples.
+  testEmailsTo: "dbelkind@usc.edu",
   // The site's pings run at most this often, since anyone with the web app's link could call it.
   quickSyncSeconds: 5,
 };
@@ -42,7 +44,7 @@ const RULE_NAMES = [
   "appointmentsOn", "evaluateVisitSlot", "evaluateManagers", "managerCandidates", "normalizeSkills", "isOffHours",
   "SLOT_TITLES", "staffingState", "personLabel", "visitKey", "visitWindow", "unusualTimes", "visitPartsLabel",
   "defaultVisitsThrough", "assignmentLines", "checkAssignment", "BOOKING_STARTS", "clockTime", "wantsEmail", "SEE_TIME",
-  "staffRoles", "unavailableOn",
+  "staffRoles", "unavailableOn", "bookingEmail",
 ];
 // Older trigger names are listed too, so running setUp again clears them away.
 const TRIGGERS = ["syncStaffing", "hourlySync", "checkRequests", "frequentChecks", "dailyVisits"];
@@ -207,13 +209,37 @@ function emailReviewers(rules, members, kind, items, compose) {
   }
   for (const group of groups.values()) {
     const { subject, lines } = compose(group.items);
-    MailApp.sendEmail({
-      to: group.reviewers.map((reviewer) => reviewer.id).join(","),
-      subject,
-      body: [`Hi ${namesList(group.reviewers)},`, "", ...lines, "", EMAIL_FOOTER].join("\n"),
-    });
+    MailApp.sendEmail({ to: group.reviewers.map((reviewer) => reviewer.id).join(","), subject, body: reviewerBody(group.reviewers, lines) });
   }
   return groups.size;
+}
+
+function reviewerBody(reviewers, lines) {
+  return [`Hi ${namesList(reviewers)},`, "", ...lines, "", EMAIL_FOOTER].join("\n");
+}
+
+// --- The reviewer email templates. Each returns { subject, lines }, and sendTestEmails sends a sample of each. ---
+
+function requestsEmail(requests, nameOf) {
+  return {
+    subject: requests.length === 1
+      ? `Lab schedule: ${nameOf(requests[0].owner)} sent a request to review`
+      : `Lab schedule: ${requests.length} new requests to review`,
+    lines: [
+      requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Schedule:" : "New requests are waiting for review on the Lifespan Cognition Lab Schedule:",
+      "",
+      ...requests.map((request) => `• ${nameOf(request.owner)}: ${request.text}`),
+      "",
+      `Review them here: ${CONFIG.siteUrl}#review`,
+    ],
+  };
+}
+
+function updatesEmail(updates, nameOf) {
+  return {
+    subject: updates.length === 1 ? `Lab schedule: ${nameOf(updates[0].owner)} updated their schedule` : `Lab schedule: ${updates.length} schedule updates`,
+    lines: ["Grad Students/Post-Docs saved these changes (no review needed):", "", ...updates.map((notice) => `• ${nameOf(notice.owner)}: ${notice.text}`)],
+  };
 }
 
 // Emails reviewers about requests waiting for review, once per request, and about changes Grad Students/Post-Docs
@@ -249,24 +275,8 @@ function checkRequests() {
   const fresh = pending.filter((request) => !notified.has(request.id));
   // Requests and saved updates are separate kinds of email, so each reviewer gets just the ones they want.
   const updateItems = notices.map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary }));
-  const emailed = emailReviewers(rules, members, "requests", fresh, (requests) => {
-    const subject = requests.length === 1
-      ? `Lab schedule: ${nameOf(requests[0].owner)} sent a request to review`
-      : `Lab schedule: ${requests.length} new requests to review`;
-    return {
-      subject,
-      lines: [
-        requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Schedule:" : "New requests are waiting for review on the Lifespan Cognition Lab Schedule:",
-        "",
-        ...requests.map((request) => `• ${nameOf(request.owner)}: ${request.text}`),
-        "",
-        `Review them here: ${CONFIG.siteUrl}#review`,
-      ],
-    };
-  }) + emailReviewers(rules, members, "updates", updateItems, (updates) => ({
-    subject: updates.length === 1 ? `Lab schedule: ${nameOf(updates[0].owner)} updated their schedule` : `Lab schedule: ${updates.length} schedule updates`,
-    lines: ["Grad Students/Post-Docs saved these changes (no review needed):", "", ...updates.map((notice) => `• ${nameOf(notice.owner)}: ${notice.text}`)],
-  }));
+  const emailed = emailReviewers(rules, members, "requests", fresh, (requests) => requestsEmail(requests, nameOf))
+    + emailReviewers(rules, members, "updates", updateItems, (updates) => updatesEmail(updates, nameOf));
   // Only requests still waiting are remembered, so this list stays small. Notices are done with once emailed.
   properties.setProperty("notifiedRequests", JSON.stringify(pendingIds));
   for (const notice of notices) deleteDocument(`notices/${notice.id}`);
@@ -320,30 +330,33 @@ function checkCancellations(site = loadSite(), staffing = listCollection("staffi
     if (!current[key] && old.date >= todayIso) items.push({ id: `${key}:cancelled`, owner: null, key, visit: old, kind: "visit" });
   }
   items.sort((a, b) => a.visit.date.localeCompare(b.visit.date));
-  const describe = (item) => `${emailDateWithDay(item.visit.date)}, ${item.visit.times}${item.visit.seeTime ? ` ${rules.SEE_TIME}` : ""}`;
-  const emailed = emailReviewers(rules, members, "cancellations", items, (theirs) => {
-    const bookings = theirs.filter((item) => item.kind === "booking");
-    const visits = theirs.filter((item) => item.kind === "visit");
-    const subject = theirs.length === 1
-      ? `Lab schedule: ${bookings.length ? "booking" : "visit"} cancelled for ${emailDateWithDay(theirs[0].visit.date)}`
-      : `Lab schedule: ${theirs.length} cancellations`;
-    const lines = [];
-    if (bookings.length) {
-      lines.push(bookings.length === 1 ? "A booking was cancelled:" : "Bookings were cancelled:", "");
-      for (const item of bookings) lines.push(`• ${describe(item)}${item.visit.by ? `, cancelled by ${item.visit.by}` : ""}`, `  Cancel the visit if it won't be rebooked: ${CONFIG.siteUrl}#visit=${item.key}`);
-      lines.push("", "The visit stays open so it can be rebooked, and its staff haven't been told. Update the lab's appointment calendar in Google Calendar.");
-    }
-    if (visits.length) {
-      if (lines.length) lines.push("");
-      lines.push(visits.length === 1 ? "A visit was cancelled:" : "Visits were cancelled:", "", ...visits.map((item) => `• ${describe(item)}`), "",
-        CONFIG.inviteStaff
-          ? "Its staff are emailed automatically within 10 minutes. Update the lab's appointment calendar in Google Calendar."
-          : "Staff emails are switched off for now, so its staff haven't been emailed. Update the lab's appointment calendar in Google Calendar.");
-    }
-    return { subject, lines };
-  });
+  const emailed = emailReviewers(rules, members, "cancellations", items, (theirs) => cancellationsEmail(rules, theirs));
   if (items.length) console.log(`${items.length} cancellation(s); sent ${emailed} email(s).`);
   return { emailed, cancellations: items.length };
+}
+
+// Items are { key, kind: "booking" | "visit", visit: { date, times, by, seeTime } }.
+function cancellationsEmail(rules, items) {
+  const describe = (item) => `${emailDateWithDay(item.visit.date)}, ${item.visit.times}${item.visit.seeTime ? ` ${rules.SEE_TIME}` : ""}`;
+  const bookings = items.filter((item) => item.kind === "booking");
+  const visits = items.filter((item) => item.kind === "visit");
+  const subject = items.length === 1
+    ? `Lab schedule: ${bookings.length ? "booking" : "visit"} cancelled for ${emailDateWithDay(items[0].visit.date)}`
+    : `Lab schedule: ${items.length} cancellations`;
+  const lines = [];
+  if (bookings.length) {
+    lines.push(bookings.length === 1 ? "A booking was cancelled:" : "Bookings were cancelled:", "");
+    for (const item of bookings) lines.push(`• ${describe(item)}${item.visit.by ? `, cancelled by ${item.visit.by}` : ""}`, `  Cancel the visit if it won't be rebooked: ${CONFIG.siteUrl}#visit=${item.key}`);
+    lines.push("", "The visit stays open so it can be rebooked, and its staff haven't been told. Update the lab's appointment calendar in Google Calendar.");
+  }
+  if (visits.length) {
+    if (lines.length) lines.push("");
+    lines.push(visits.length === 1 ? "A visit was cancelled:" : "Visits were cancelled:", "", ...visits.map((item) => `• ${describe(item)}`), "",
+      CONFIG.inviteStaff
+        ? "Its staff are emailed automatically within 10 minutes. Update the lab's appointment calendar in Google Calendar."
+        : "Staff emails are switched off for now, so its staff haven't been emailed. Update the lab's appointment calendar in Google Calendar.");
+  }
+  return { subject, lines };
 }
 
 // At 8:30 AM: which scan to book, and upcoming birthdays and graduations.
@@ -354,6 +367,19 @@ function dailyVisits() {
   withLock(() => syncVisits(site, listCollection("staffing"), new Date()));
 }
 
+function scanReminderEmail(rules, iso, visit) {
+  return {
+    subject: `Lab schedule: book the scan for ${emailDateWithDay(iso)}`,
+    lines: [
+      `A new participant visit opened for booking on ${emailDateWithDay(iso)}, ${visitTimesForEmail(rules, visit)}.`,
+      "",
+      `Please book the scan for ${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}.`,
+      "",
+      `See it here: ${CONFIG.siteUrl}`,
+    ],
+  };
+}
+
 // The day that opened at 8:00 AM, 60 days ahead, needs its scan booked.
 function remindScanBooking(site) {
   const iso = site.rules.defaultVisitsThrough(new Date());
@@ -361,16 +387,7 @@ function remindScanBooking(site) {
   const visits = site.rules.appointmentsOn(iso, site.appointments, site.holidays, iso).filter((appointment) => appointment.defaultFor && appointment.scan);
   if (visits.length) {
     const [visit] = visits;
-    emailReviewers(site.rules, site.members, "scanReminders", [{ id: iso, owner: null }], () => ({
-      subject: `Lab schedule: book the scan for ${emailDateWithDay(iso)}`,
-      lines: [
-        `A new participant visit opened for booking on ${emailDateWithDay(iso)}, ${visitTimesForEmail(site.rules, visit)}.`,
-        "",
-        `Please book the scan for ${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}.`,
-        "",
-        `See it here: ${CONFIG.siteUrl}`,
-      ],
-    }));
+    emailReviewers(site.rules, site.members, "scanReminders", [{ id: iso, owner: null }], () => scanReminderEmail(site.rules, iso, visit));
     console.log(`Asked reviewers to book the scan for ${iso}.`);
   }
 }
@@ -470,24 +487,27 @@ function syncCelebrations(site, profiles, today) {
   writeCalendar(calendarId, wanted, today, 367);
 }
 
+// Items are celebrations with `when`: "today", "tomorrow", "in 1 week" or "in 1 month".
+function celebrationsEmail(items) {
+  const first = items[0];
+  const subject = items.length === 1
+    ? `Lab: ${first.name}'s ${first.kind === "birthday" ? "birthday" : "expected graduation"} is ${first.when}`
+    : `Lab: ${items.length} birthdays and graduations coming up`;
+  const lines = [];
+  for (const item of items) {
+    const date = item.kind === "birthday" ? emailDateWithDay(item.iso) : `${graduationText(item.profile.graduation)}, marked on ${emailDateWithDay(item.iso)}`;
+    lines.push(`${celebrationTitle(item)}: ${item.when} (${date})`, ...favoritesLines(item.profile).map((line) => `  ${line}`), "");
+  }
+  lines.push(`See everyone's details in the Lab Directory: ${CONFIG.siteUrl}`);
+  return { subject, lines };
+}
+
 // Lab managers get one email a morning with any reminders due. Nobody is reminded about their own.
 function remindCelebrations(site, profiles, today) {
   const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;
   const current = profiles.filter((profile) => site.members.some((member) => member.id === profile.id));
   const due = celebrationReminders(current, nameOf, isoOf(today)).map((item) => ({ ...item, id: `${item.kind}:${item.email}`, owner: item.email }));
-  return emailReviewers(site.rules, site.members, "celebrations", due, (items) => {
-    const first = items[0];
-    const subject = items.length === 1
-      ? `Lab: ${first.name}'s ${first.kind === "birthday" ? "birthday" : "expected graduation"} is ${first.when}`
-      : `Lab: ${items.length} birthdays and graduations coming up`;
-    const lines = [];
-    for (const item of items) {
-      const date = item.kind === "birthday" ? emailDateWithDay(item.iso) : `${graduationText(item.profile.graduation)}, marked on ${emailDateWithDay(item.iso)}`;
-      lines.push(`${celebrationTitle(item)}: ${item.when} (${date})`, ...favoritesLines(item.profile).map((line) => `  ${line}`), "");
-    }
-    lines.push(`See everyone's details in the Lab Directory: ${CONFIG.siteUrl}`);
-    return { subject, lines };
-  });
+  return emailReviewers(site.rules, site.members, "celebrations", due, celebrationsEmail);
 }
 
 // --- Reading the website and the database ---
@@ -896,6 +916,57 @@ function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), t
   for (const [key, visit] of Object.entries(after)) properties.setProperty(`staff:${key}`, JSON.stringify(visit));
   if (emailed) console.log(`Emailed ${emailed} staff member(s) about their visits.`);
   return { emailed };
+}
+
+// --- Test emails ---
+// Run sendTestEmails from the Apps Script editor to see one sample of every email the lab sends. They all go to
+// CONFIG.testEmailsTo alone, with [TEST] in the subject, using made-up people and visits; nobody else is emailed and
+// nothing is saved.
+function sendTestEmails() {
+  const rules = loadRules();
+  const to = CONFIG.testEmailsTo;
+  const send = (audience, subject, body) => MailApp.sendEmail({ to, subject: `[TEST] ${subject}`, body: `(Test email: this is what ${audience} get.)\n\n${body}` });
+  const reviewers = [{ name: "Alex" }, { name: "Sam" }];
+  const toReviewers = ({ subject, lines }) => send("lab managers", subject, reviewerBody(reviewers, lines));
+  const nameOf = (email) => ({ "jordan@usc.edu": "Jordan", "taylor@usc.edu": "Taylor" }[email] || email);
+  const profile = { birthday: "2001-12-10", graduation: "2027-05", color: "Teal", dessert: "Tiramisu", dietary: "Tree nut allergy" };
+  const usual = { lab: { start: "09:00", end: "11:00" }, scan: { start: "11:00", end: "13:00", wandingRequired: true } };
+  const early = { lab: { start: "09:00", end: "10:00" }, scan: { start: "10:00", end: "12:00", wandingRequired: true } };
+
+  toReviewers(requestsEmail([
+    { owner: "jordan@usc.edu", text: "Time off: Jan 20, 2027, 2:00 PM – 4:00 PM (Doctor's appointment)" },
+    { owner: "taylor@usc.edu", text: 'Schedule change: Add "Unavailable, standing conflict (Lab meeting): Fri, 1:00 PM – 2:00 PM"' },
+  ], nameOf));
+  toReviewers(updatesEmail([{ owner: "taylor@usc.edu", text: "Time off: Feb 3, 2027 (Conference)" }], nameOf));
+  toReviewers(cancellationsEmail(rules, [{ key: "default-2027-01-12", kind: "booking", visit: { date: "2027-01-12", times: "9:00 AM – 1:00 PM", by: "Jordan", seeTime: false } }]));
+  toReviewers(cancellationsEmail(rules, [{ key: "x", kind: "visit", visit: { date: "2027-01-14", times: "9:00 AM – 1:00 PM", seeTime: true } }]));
+  toReviewers(scanReminderEmail(rules, "2027-01-12", usual));
+  toReviewers(celebrationsEmail([{ iso: "2026-12-10", kind: "birthday", name: "Jordan", profile, when: "in 1 week" }]));
+  toReviewers(celebrationsEmail([
+    { iso: "2026-12-10", kind: "birthday", name: "Jordan", profile, when: "today" },
+    { iso: "2027-05-01", kind: "graduation", name: "Taylor", profile: { ...profile, dietary: "Vegetarian" }, when: "in 1 month" },
+  ]));
+
+  const booker = rules.bookingEmail({
+    when: "Tue, Jan 12, 2027, 9:00 AM – 1:00 PM",
+    parts: "Lab portion 9:00 AM – 10:00 AM · Scan 10:00 AM – 12:00 PM",
+    seeTime: rules.unusualTimes(early),
+    link: `${CONFIG.siteUrl}#visit=default-2027-01-12`,
+  });
+  send("reviewers from a booker (the site drafts it in the booker's own email; they fill in the Screener ID)", booker.subject, booker.body);
+
+  const visit = { date: "2027-01-12", visit: "9:00 AM – 1:00 PM", seeTime: rules.unusualTimes(early), people: {} };
+  const roles = ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:30 AM–11:30 AM"];
+  const staffSample = (changes) => {
+    const { subject, body } = staffEmail(rules, "Jordan", changes);
+    send("staff (once staff emails are switched on)", subject, body);
+  };
+  staffSample([{ type: "assigned", visit, roles }]);
+  staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:45 AM–11:45 AM"], was: roles, oldVisit: visit }]);
+  staffSample([{ type: "removed", visit: { ...visit, seeTime: [] }, roles }]);
+  staffSample([{ type: "cancelled", visit: { ...visit, seeTime: [] }, roles }]);
+  staffSample([{ type: "assigned", visit, roles }, { type: "cancelled", visit: { ...visit, date: "2027-01-14", seeTime: [] }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);
+  console.log(`Sent 13 test emails to ${to}.`);
 }
 
 // --- Writing the calendars ---

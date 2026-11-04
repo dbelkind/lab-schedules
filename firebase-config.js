@@ -9,4 +9,4 @@ const FIREBASE_CONFIG = {
 
 // The Apps Script's web app URL (in Apps Script: Deploy > Manage deployments), so the site can ask it to update
 // LCL Visits and send cancellation emails straight away after a change. Left empty, they happen every 10 minutes.
-const SYNC_URL = "";
+const SYNC_URL = "https://script.google.com/macros/s/AKfycbw6GgI6jDw8CkqsgupFlP3xeEuflgCPv2u5CrUlZssQKbof7Y8hj5boU8KdFWtsCNO1Nw/exec";
