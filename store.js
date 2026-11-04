@@ -65,6 +65,29 @@ const Store = (() => {
     },
 
     listChangeRequests: (ownerEmail) => listAll("changeRequests", ownerEmail),
+
+    // The semesters someone has said they have no classes in, so they aren't reminded to add a class schedule.
+    // Reviewers get everyone's; anyone else only their own.
+    async listNoClasses(email) {
+      if (email) {
+        const doc = await db.collection("noClasses").doc(email).get();
+        return doc.exists ? [{ email, ...doc.data() }] : [];
+      }
+      return (await db.collection("noClasses").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
+    },
+    saveNoClasses: (email, semesters) => db.collection("noClasses").doc(email).set({ semesters }),
+
+    // Calls back with how many time off requests and schedule changes are waiting, now and whenever that changes.
+    // Returns a function that stops watching. Only reviewers can do this.
+    watchPending(onCount) {
+      const counts = { timeOff: 0, changeRequests: 0 };
+      const watch = (collection) => db.collection(collection).where("status", "==", "pending").onSnapshot((snapshot) => {
+        counts[collection] = snapshot.size;
+        onCount(counts.timeOff + counts.changeRequests);
+      }, () => {});
+      const stops = [watch("timeOff"), watch("changeRequests")];
+      return () => stops.forEach((stop) => stop());
+    },
     // Tells reviewers about a Grad Student/Post-Doc's change; the Apps Script emails these and then deletes them.
     createNotice: (data) => db.collection("notices").add(data),
     createChangeRequest: (data) => db.collection("changeRequests").add(data),
@@ -110,9 +133,23 @@ const Store = (() => {
       });
     },
 
+    // The USC academic calendar and staff holidays as lab managers last saved them, or null for either not saved yet.
+    async getSettings() {
+      const [academic, holidays] = await Promise.all(["academicCalendar", "staffHolidays"].map((name) => db.collection("settings").doc(name).get()));
+      return { academic: academic.exists ? academic.data() : null, holidays: holidays.exists ? holidays.data() : null };
+    },
+    saveSetting: (name, data) => db.collection("settings").doc(name).set(data),
+
     // The lab directory (name, directory role and phone), which everyone in the lab can see.
     listDirectory: async () => (await db.collection("directory").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() })),
     saveDirectory: (email, data) => db.collection("directory").doc(email).set(data, { merge: true }),
+    // Takes a phone number out of someone's directory entry, as when it moves to directoryPrivate.
+    clearDirectoryPhone: (email) => db.collection("directory").doc(email).update({ phone: firebase.firestore.FieldValue.delete() }),
+
+    // A PI's phone number, kept apart so RAs can't see it. Only Grad Students/Post-Docs and reviewers can read these.
+    listPrivatePhones: async () => (await db.collection("directoryPrivate").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() })),
+    savePrivatePhone: (email, phone) => db.collection("directoryPrivate").doc(email).set({ phone }),
+    deletePrivatePhone: (email) => db.collection("directoryPrivate").doc(email).delete(),
 
     // Birthdays, graduation and favorites, which only the person and lab managers can see.
     async getProfile(email) {
@@ -156,6 +193,7 @@ const Store = (() => {
       for (const { id } of timeOff) batch.delete(db.collection("timeOff").doc(id));
       for (const { id } of changes) batch.delete(db.collection("changeRequests").doc(id));
       batch.delete(db.collection("directory").doc(email));
+      batch.delete(db.collection("directoryPrivate").doc(email));
       batch.delete(db.collection("profiles").doc(email));
       batch.delete(db.collection("members").doc(email));
       return batch.commit();

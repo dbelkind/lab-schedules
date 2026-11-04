@@ -1,8 +1,7 @@
-// Connects the Lifespan Cognition Lab Schedule to Google Calendar and email. It keeps four calendars for lab managers:
+// Connects the Lifespan Cognition Lab Member Portal to Google Calendar and email. It keeps three calendars for lab managers:
 // - "LCL Visits": each participant visit, colored by its booking (gray open, blue booked, orange waiting to be
 //   rebooked), with who's available for each part. Updated every 10 minutes, and straight away when the site pings it.
 // - "LCL Confirmed Visits": each staffed visit, with who's doing what. Updated every 10 minutes.
-// - "LCL Unavailability": when each lab member can't be in the lab. Updated every hour.
 // - "LCL Birthdays & Graduations": everyone's birthday and expected graduation, for the next year. Updated every hour.
 // It also emails reviewers about requests, cancellations, and at 8:30 AM which visit's scan to book and upcoming
 // birthdays and graduations, and emails staff about the visits they're staffing.
@@ -19,7 +18,6 @@ const CONFIG = {
   siteUrl: "https://dbelkind.github.io/lab-schedules/",
   visitsCalendarName: "LCL Visits",
   confirmedCalendarName: "LCL Confirmed Visits",
-  unavailabilityCalendarName: "LCL Unavailability",
   celebrationsCalendarName: "LCL Birthdays & Graduations",
   daysAhead: 60,
   timeZone: "America/Los_Angeles",
@@ -27,6 +25,14 @@ const CONFIG = {
   // aren't emailed. Only reviewers get emails. Set it to true to add staff as guests and email them about their visits.
   // Google itself never emails guests: the script sends each person their own email instead.
   inviteStaff: false,
+  // While this is false, RAs and other lab members aren't emailed either: no semester or finals schedule reminders,
+  // and no word when a request of theirs is reviewed. Turn it on with inviteStaff once testing is done.
+  emailLabMembers: false,
+  // Which semesters RAs are asked to send a class schedule for. Summer is left out, since most RAs don't take
+  // summer classes; add "summer" to ask for those too.
+  scheduleSemesters: ["spring", "fall"],
+  // Where "Received this email by mistake?" at the bottom of every email goes.
+  labManagerEmail: "dbelkind@usc.edu",
   // Where sendTestEmails sends its samples.
   testEmailsTo: "dbelkind@usc.edu",
   // The site's pings run at most this often, since anyone with the web app's link could call it.
@@ -44,7 +50,7 @@ const RULE_NAMES = [
   "appointmentsOn", "evaluateVisitSlot", "evaluateManagers", "managerCandidates", "normalizeSkills", "isOffHours",
   "SLOT_TITLES", "staffingState", "personLabel", "visitKey", "visitWindow", "unusualTimes", "visitPartsLabel",
   "defaultVisitsThrough", "assignmentLines", "checkAssignment", "BOOKING_STARTS", "clockTime", "wantsEmail", "SEE_TIME",
-  "staffRoles", "unavailableOn", "bookingEmail",
+  "staffRoles", "bookingEmail", "birthdayMonthDay",
 ];
 // Older trigger names are listed too, so running setUp again clears them away.
 const TRIGGERS = ["syncStaffing", "hourlySync", "checkRequests", "frequentChecks", "dailyVisits"];
@@ -62,14 +68,20 @@ function setUp() {
 }
 
 // Everything the rules need, read fresh from the site and the database.
+// The USC calendars come from Lab Management → Website management once a lab manager has saved them there, and
+// from the files published with the site until then.
 function loadSite() {
   const rules = loadRules();
-  const academic = fetchJson("data/academic-calendar.json");
-  const staff = fetchJson("data/staff-holidays.json");
+  const settings = listCollection("settings");
+  const savedAcademic = settings.find((doc) => doc.id === "academicCalendar");
+  const savedHolidays = settings.find((doc) => doc.id === "staffHolidays");
+  const academic = savedAcademic && savedAcademic.semesters ? savedAcademic : fetchJson("data/academic-calendar.json");
+  const staff = savedHolidays && savedHolidays.holidays ? savedHolidays : fetchJson("data/staff-holidays.json");
   const members = listCollection("members");
   return {
     rules,
     members,
+    academic: { semesters: academic.semesters, events: academic.events || [] },
     holidays: staff.holidays,
     appointments: listCollection("appointments"),
     data: {
@@ -94,28 +106,15 @@ function withLock(work) {
   }
 }
 
-// Every hour: LCL Unavailability and LCL Birthdays & Graduations.
+// Every hour: LCL Birthdays & Graduations.
 function hourlySync() {
-  withLock(() => {
-    const site = loadSite();
-    const today = new Date();
-    syncUnavailability(site, today);
-    syncCelebrations(site, listCollection("profiles"), today);
-  });
-}
-
-function syncUnavailability(site, today) {
-  const wanted = buildUnavailabilityEvents(site.rules, site.data, today);
-  const calendarId = calendarIdFor("unavailabilityCalendarId", CONFIG.unavailabilityCalendarName,
-    "When each lab member can't be in the lab. Filled in automatically every hour from the Lifespan Cognition Lab Schedule.");
-  const changes = writeCalendar(calendarId, wanted, today, CONFIG.daysAhead + 1);
-  console.log(`LCL Unavailability synced: ${wanted.length} times, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
+  withLock(() => syncCelebrations(loadSite(), listCollection("profiles"), new Date()));
 }
 
 function syncVisits(site, staffing, today) {
   const wanted = buildVisitEvents(site.rules, site.data, site.appointments, site.holidays, today, staffing);
   const calendarId = calendarIdFor("calendarId", CONFIG.visitsCalendarName,
-    "Participant visits: gray when open, blue when booked, orange when a booking was cancelled and it's open to rebook. Says who's available for each part. From the Lifespan Cognition Lab Schedule.");
+    "Participant visits: gray when open, blue when booked, orange when a booking was cancelled and it's open to rebook. Says who's available for each part. From the Lifespan Cognition Lab Member Portal.");
   const changes = writeCalendar(calendarId, wanted, today, CONFIG.daysAhead + 1);
   console.log(`LCL Visits synced: ${wanted.length} visits, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
 }
@@ -164,7 +163,70 @@ function quickSync() {
 
 const MONTH_ABBREVIATIONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAY_ABBREVIATIONS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const EMAIL_FOOTER = "To choose which emails you get, go to Lab Management → My information on the site.";
+const EMAIL_FOOTER = "To choose which emails you get, go to Lab Management → Settings on the site.";
+
+// Emails are written as lines with a little markup, so what matters stands out: **bold**, __underlined__ and
+// ==highlighted==. They go out as HTML, with the markup taken out of the plain-text copy.
+function bold(text) {
+  return `**${text}**`;
+}
+
+function underline(text) {
+  return `__${text}__`;
+}
+
+function highlight(text) {
+  return `==${text}==`;
+}
+
+// Dates and times are the easiest things to miss, so they're bold and highlighted.
+function dateMark(text) {
+  return bold(highlight(text));
+}
+
+function plainText(line) {
+  return line.replace(/\*\*|__|==/g, "");
+}
+
+function htmlLine(line) {
+  let html = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  html = html.replace(/(https?:\/\/[^\s<]*[^\s<.,;:)])/g, '<a href="$1" style="color:#0f766e;font-weight:600">$1</a>');
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/==(.+?)==/g, '<mark style="background:#fde68a;color:#14201e;padding:0 3px;border-radius:3px">$1</mark>')
+    .replace(/__(.+?)__/g, "<u>$1</u>");
+  if (!line.trim()) return '<div style="height:12px"></div>';
+  const indent = line.startsWith("  ") ? "padding-left:18px;" : "";
+  return `<div style="${indent}margin:0 0 4px">${html}</div>`;
+}
+
+function mistakeLink(subject) {
+  return `mailto:${CONFIG.labManagerEmail}?subject=${encodeURIComponent("Lab email received by mistake")}&body=${encodeURIComponent(`I received this email by mistake, or it has an error.\n\nThe email's subject: ${subject}\n\nWhat's wrong: `)}`;
+}
+
+function emailHtml(subject, lines, footer) {
+  const footerHtml = [
+    ...footer.map((line) => `<div style="margin:0 0 6px">${htmlLine(line).replace(/^<div[^>]*>|<\/div>$/g, "")}</div>`),
+    `<div>Received this email by mistake? <a href="${mistakeLink(subject)}" style="color:#a03a6a;font-weight:600">Click here</a> to notify the lab manager if there was an error.</div>`,
+  ].join("");
+  return [
+    '<div style="background:#f5f7f7;padding:24px 12px;font-family:Inter,-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif">',
+    '<div style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #e1e7e6;border-radius:12px;overflow:hidden">',
+    '<div style="background:#0f766e;color:#ffffff;padding:14px 22px;font-size:15px;font-weight:700;border-bottom:4px solid #f1abc8">Lifespan Cognition Lab</div>',
+    `<div style="padding:20px 22px;font-size:15px;line-height:1.55;color:#14201e">${lines.map(htmlLine).join("")}</div>`,
+    `<div style="padding:14px 22px;border-top:1px solid #f8d0e0;background:#fdf3f7;color:#5b6b68;font-size:12px;line-height:1.5">${footerHtml}</div>`,
+    "</div></div>",
+  ].join("");
+}
+
+// Every email goes through here, so they all look the same and all say how to report one sent by mistake.
+function sendEmail({ to, subject, lines, footer = [] }) {
+  MailApp.sendEmail({
+    to,
+    subject,
+    body: [...lines.map(plainText), "", ...footer.map(plainText), `Received this email by mistake? Let the lab manager know: ${CONFIG.labManagerEmail}`].join("\n"),
+    htmlBody: emailHtml(subject, lines, footer),
+  });
+}
 
 function emailDate(iso) {
   const [year, month, day] = iso.split("-").map(Number);
@@ -182,9 +244,9 @@ function emailTime(time) {
 }
 
 function describeTimeOffForEmail(request) {
-  const dates = request.from === request.to ? emailDate(request.from) : `${emailDate(request.from)} – ${emailDate(request.to)}`;
+  const dates = request.from === request.to ? emailDateWithDay(request.from) : `${emailDateWithDay(request.from)} – ${emailDateWithDay(request.to)}`;
   const hours = request.start ? `, ${emailTime(request.start)} – ${emailTime(request.end)}` : "";
-  return `${dates}${hours}${request.note ? ` (${request.note})` : ""}`;
+  return `${dateMark(`${dates}${hours}`)}${request.note ? ` (${request.note})` : ""}`;
 }
 
 function namesList(people) {
@@ -209,13 +271,13 @@ function emailReviewers(rules, members, kind, items, compose) {
   }
   for (const group of groups.values()) {
     const { subject, lines } = compose(group.items);
-    MailApp.sendEmail({ to: group.reviewers.map((reviewer) => reviewer.id).join(","), subject, body: reviewerBody(group.reviewers, lines) });
+    sendEmail({ to: group.reviewers.map((reviewer) => reviewer.id).join(","), subject, lines: reviewerLines(group.reviewers, lines), footer: [EMAIL_FOOTER] });
   }
   return groups.size;
 }
 
-function reviewerBody(reviewers, lines) {
-  return [`Hi ${namesList(reviewers)},`, "", ...lines, "", EMAIL_FOOTER].join("\n");
+function reviewerLines(reviewers, lines) {
+  return [`Hi ${namesList(reviewers)},`, "", ...lines];
 }
 
 // --- The reviewer email templates. Each returns { subject, lines }, and sendTestEmails sends a sample of each. ---
@@ -226,9 +288,9 @@ function requestsEmail(requests, nameOf) {
       ? `Lab schedule: ${nameOf(requests[0].owner)} sent a request to review`
       : `Lab schedule: ${requests.length} new requests to review`,
     lines: [
-      requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Schedule:" : "New requests are waiting for review on the Lifespan Cognition Lab Schedule:",
+      requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Member Portal:" : "New requests are waiting for review on the Lifespan Cognition Lab Member Portal:",
       "",
-      ...requests.map((request) => `• ${nameOf(request.owner)}: ${request.text}`),
+      ...requests.map((request) => `• ${bold(nameOf(request.owner))}: ${request.text}`),
       "",
       `Review them here: ${CONFIG.siteUrl}#review`,
     ],
@@ -238,7 +300,7 @@ function requestsEmail(requests, nameOf) {
 function updatesEmail(updates, nameOf) {
   return {
     subject: updates.length === 1 ? `Lab schedule: ${nameOf(updates[0].owner)} updated their schedule` : `Lab schedule: ${updates.length} schedule updates`,
-    lines: ["Grad Students/Post-Docs saved these changes (no review needed):", "", ...updates.map((notice) => `• ${nameOf(notice.owner)}: ${notice.text}`)],
+    lines: ["Grad Students/Post-Docs saved these changes (no review needed):", "", ...updates.map((notice) => `• ${bold(nameOf(notice.owner))}: ${notice.text}`)],
   };
 }
 
@@ -248,13 +310,15 @@ function checkRequests() {
   const rules = loadRules();
   const members = listCollection("members");
   const nameOf = (email) => (members.find((member) => member.id === email) || {}).name || email;
+  const allTimeOff = listCollection("timeOff");
+  const allChanges = listCollection("changeRequests");
   const pending = [
-    ...listCollection("timeOff").filter((request) => request.status === "pending").map((request) => ({
+    ...allTimeOff.filter((request) => request.status === "pending").map((request) => ({
       id: `timeOff/${request.id}`,
       owner: request.ownerEmail,
       text: `Time off: ${describeTimeOffForEmail(request)}`,
     })),
-    ...listCollection("changeRequests").filter((request) => request.status === "pending").map((request) => ({
+    ...allChanges.filter((request) => request.status === "pending").map((request) => ({
       id: `changeRequests/${request.id}`,
       owner: request.ownerEmail,
       text: `Schedule change: ${request.summary}`,
@@ -277,11 +341,43 @@ function checkRequests() {
   const updateItems = notices.map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary }));
   const emailed = emailReviewers(rules, members, "requests", fresh, (requests) => requestsEmail(requests, nameOf))
     + emailReviewers(rules, members, "updates", updateItems, (updates) => updatesEmail(updates, nameOf));
+  // Requests that were waiting last time and have been decided since: the person who sent them hears how it went.
+  const decided = [...notified].filter((id) => !pendingIds.includes(id)).map((id) => {
+    const [collection, docId] = id.split("/");
+    const request = (collection === "timeOff" ? allTimeOff : allChanges).find((item) => item.id === docId);
+    return request && ["approved", "declined"].includes(request.status) ? { ...request, kind: collection } : null;
+  }).filter(Boolean);
+  if (CONFIG.emailLabMembers) {
+    for (const request of decided) sendEmail({ to: request.ownerEmail, ...reviewResultEmail(request, nameOf) });
+  } else if (decided.length) {
+    console.log(`${decided.length} request(s) decided; lab member emails are switched off, so their senders weren't emailed.`);
+  }
   // Only requests still waiting are remembered, so this list stays small. Notices are done with once emailed.
   properties.setProperty("notifiedRequests", JSON.stringify(pendingIds));
   for (const notice of notices) deleteDocument(`notices/${notice.id}`);
   if (fresh.length || notices.length) console.log(`${fresh.length} new request(s) and ${notices.length} update(s); sent ${emailed} email(s).`);
   return { emailed, fresh: fresh.length };
+}
+
+// To the person who sent a request, once a reviewer has decided it.
+function reviewResultEmail(request, nameOf) {
+  const approved = request.status === "approved";
+  const decision = bold(underline(approved ? "approved" : "declined"));
+  const what = request.kind === "timeOff" ? "time off request" : "schedule change";
+  const detail = request.kind === "timeOff" ? ` for ${describeTimeOffForEmail(request)}` : `: ${request.summary}`;
+  return {
+    subject: `Lab schedule: your ${what} was ${approved ? "approved" : "declined"}`,
+    lines: [
+      `Hi ${nameOf(request.ownerEmail)},`,
+      "",
+      `Your ${what}${detail} was ${decision} by ${bold(nameOf(request.reviewedBy))}.`,
+      ...(request.reviewNote ? ["", `${bold("Their note:")} ${request.reviewNote}`] : []),
+      "",
+      approved ? "It's on your calendar now." : "If you have questions, ask a lab manager. You can send a new request any time.",
+      "",
+      `See your schedule: ${CONFIG.siteUrl}`,
+    ],
+  };
 }
 
 function visitTimesForEmail(rules, appointment) {
@@ -337,33 +433,38 @@ function checkCancellations(site = loadSite(), staffing = listCollection("staffi
 
 // Items are { key, kind: "booking" | "visit", visit: { date, times, by, seeTime } }.
 function cancellationsEmail(rules, items) {
-  const describe = (item) => `${emailDateWithDay(item.visit.date)}, ${item.visit.times}${item.visit.seeTime ? ` ${rules.SEE_TIME}` : ""}`;
+  const describe = (item) => `${dateMark(`${emailDateWithDay(item.visit.date)}, ${item.visit.times}`)}${item.visit.seeTime ? ` ${highlight(rules.SEE_TIME)}` : ""}`;
   const bookings = items.filter((item) => item.kind === "booking");
   const visits = items.filter((item) => item.kind === "visit");
   const subject = items.length === 1
     ? `Lab schedule: ${bookings.length ? "booking" : "visit"} cancelled for ${emailDateWithDay(items[0].visit.date)}`
     : `Lab schedule: ${items.length} cancellations`;
+  const cancelled = bold(underline("cancelled"));
   const lines = [];
   if (bookings.length) {
-    lines.push(bookings.length === 1 ? "A booking was cancelled:" : "Bookings were cancelled:", "");
-    for (const item of bookings) lines.push(`• ${describe(item)}${item.visit.by ? `, cancelled by ${item.visit.by}` : ""}`, `  Cancel the visit if it won't be rebooked: ${CONFIG.siteUrl}#visit=${item.key}`);
-    lines.push("", "The visit stays open so it can be rebooked, and its staff haven't been told. Update the lab's appointment calendar in Google Calendar.");
+    lines.push(bookings.length === 1 ? `A booking was ${cancelled}:` : `Bookings were ${cancelled}:`, "");
+    for (const item of bookings) lines.push(`• ${describe(item)}${item.visit.by ? `, cancelled by ${bold(item.visit.by)}` : ""}`, `  Cancel the visit if it won't be rebooked: ${CONFIG.siteUrl}#visit=${item.key}`);
+    lines.push("", `The visit ${bold("stays open")} so it can be rebooked, and its staff ${bold("haven't been told")}. Update the lab's appointment calendar in Google Calendar.`);
   }
   if (visits.length) {
     if (lines.length) lines.push("");
-    lines.push(visits.length === 1 ? "A visit was cancelled:" : "Visits were cancelled:", "", ...visits.map((item) => `• ${describe(item)}`), "",
+    lines.push(visits.length === 1 ? `A visit was ${cancelled}:` : `Visits were ${cancelled}:`, "", ...visits.map((item) => `• ${describe(item)}`), "",
       CONFIG.inviteStaff
         ? "Its staff are emailed automatically within 10 minutes. Update the lab's appointment calendar in Google Calendar."
-        : "Staff emails are switched off for now, so its staff haven't been emailed. Update the lab's appointment calendar in Google Calendar.");
+        : `Staff emails are switched off for now, so its staff ${bold("haven't been emailed")}. Update the lab's appointment calendar in Google Calendar.`);
   }
   return { subject, lines };
 }
 
-// At 8:30 AM: which scan to book, and upcoming birthdays and graduations.
+// At 8:30 AM: which scan to book, upcoming birthdays and graduations, class and finals schedule reminders for RAs,
+// and whether the USC calendars need adding to.
 function dailyVisits() {
   const site = loadSite();
+  const profiles = listCollection("profiles");
   remindScanBooking(site);
-  remindCelebrations(site, listCollection("profiles"), new Date());
+  remindCelebrations(site, profiles, new Date());
+  remindLabMembers(site, profiles, listCollection("changeRequests"), new Date());
+  remindCalendarData(site, new Date());
   withLock(() => syncVisits(site, listCollection("staffing"), new Date()));
 }
 
@@ -371,9 +472,9 @@ function scanReminderEmail(rules, iso, visit) {
   return {
     subject: `Lab schedule: book the scan for ${emailDateWithDay(iso)}`,
     lines: [
-      `A new participant visit opened for booking on ${emailDateWithDay(iso)}, ${visitTimesForEmail(rules, visit)}.`,
+      `A new participant visit opened for booking on ${dateMark(emailDateWithDay(iso))}, ${visitTimesForEmail(rules, visit)}.`,
       "",
-      `Please book the scan for ${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}.`,
+      `Please ${bold("book the scan")} for ${dateMark(`${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}`)}.`,
       "",
       `See it here: ${CONFIG.siteUrl}`,
     ],
@@ -392,8 +493,211 @@ function remindScanBooking(site) {
   }
 }
 
+// --- Class and finals schedules ---
+// A month before a semester ends, RAs still in school are asked for next semester's class schedule, one email each,
+// then every two weeks until they've added it. A week before classes start, lab managers hear who still hasn't.
+// Two weeks before finals they're asked for their finals times, and a week before if they still haven't.
+
+function daysBetween(fromIso, toIso) {
+  return Math.round((dateAt(toIso, "12:00") - dateAt(fromIso, "12:00")) / 86400000);
+}
+
+// A semester's finals: its own dates if a lab manager added them, or the USC "Final exams" event just after classes end.
+function finalsOf(semester, events) {
+  if (semester.finalsBegin && semester.finalsEnd) return { from: semester.finalsBegin, to: semester.finalsEnd };
+  const exams = events.find((event) => /final exam/i.test(event.name) && event.from > semester.classesEnd && event.from <= addDaysIso(semester.classesEnd, 21));
+  return exams ? { from: exams.from, to: exams.to } : null;
+}
+
+function semesterEnd(semester, events) {
+  const finals = finalsOf(semester, events);
+  return finals ? finals.to : semester.classesEnd;
+}
+
+// RAs who are still students in a given month. Someone who hasn't filled in a profile is asked anyway; N/A means
+// they aren't a student.
+function studentRa(member, profile, month) {
+  if (!["ra", "member"].includes(member.role)) return false;
+  if (!profile) return true;
+  return profile.graduation !== "n/a" && profile.graduation >= month;
+}
+
+function pendingCreates(changeRequests, email) {
+  return changeRequests.filter((request) => request.ownerEmail === email && request.status === "pending").flatMap((request) => (request.plan || {}).creates || []);
+}
+
+// Done means they've added classes for it (saved or waiting for review), or said they have none.
+function hasClassSchedule(email, semester, availability, changeRequests, noClasses = []) {
+  if (((noClasses.find((item) => item.id === email) || {}).semesters || []).includes(semester.id)) return true;
+  const forSemester = (block) => block.type === "class" && (block.semester === semester.id || (block.from >= semester.classesBegin && block.from <= semester.classesEnd));
+  return availability.some((block) => block.ownerEmail === email && forSemester(block)) || pendingCreates(changeRequests, email).some(forSemester);
+}
+
+// Finals times go in as time off or one-off conflicts during finals.
+function hasFinalsTimes(email, finals, data, changeRequests) {
+  const during = (from, to) => from <= finals.to && (to || from) >= finals.from;
+  return data.timeOff.some((request) => request.ownerEmail === email && request.status !== "declined" && during(request.from, request.to))
+    || [...data.availability.filter((block) => block.ownerEmail === email), ...pendingCreates(changeRequests, email)]
+      .some((block) => block.type === "conflict" && block.to && during(block.from, block.to));
+}
+
+// A cheerful opening for where the semester is.
+function semesterGreeting(semester, events, todayIso) {
+  const finals = finalsOf(semester, events);
+  if (todayIso <= semester.classesEnd) return `Happy (almost) end of the semester! 🎉${finals ? " Good luck with finals!" : ""}`;
+  if (finals && todayIso <= finals.to) return "Good luck with finals! 📚 You've got this.";
+  return "Hope you're having a nice break :)";
+}
+
+function scheduleReminderEmail(name, semester, greeting, reminder) {
+  return {
+    subject: reminder ? `Reminder: please add your ${semester.name} class schedule` : `Please add your ${semester.name} class schedule`,
+    lines: [
+      `Hi ${name},`,
+      "",
+      greeting,
+      "",
+      `${reminder ? "Just a reminder: please" : "Please"} ${bold(`add your class schedule for ${semester.name}`)} on the lab's Member Portal, so we know when you can work in the lab. Classes start ${dateMark(emailDateWithDay(semester.classesBegin))}.`,
+      "",
+      `Go to ${bold("Schedules → Update your Availability → Class schedule")}, choose ${semester.name}, and upload a screenshot or PDF of your schedule, or enter the times by hand: ${CONFIG.siteUrl}`,
+      "",
+      `Not taking classes in ${semester.name}? Click ${bold(`I have no classes in ${semester.name}`)} on that page instead, and the reminders will stop.`,
+      "",
+      "We'll send a reminder every two weeks until it's in. Thank you!",
+    ],
+  };
+}
+
+function finalsEmail(name, semester, finals, reminder) {
+  return {
+    subject: reminder ? "Reminder: please add your finals schedule" : `Please add your finals schedule for ${semester.name}`,
+    lines: [
+      `Hi ${name},`,
+      "",
+      "Finals are almost here. Good luck! 🍀",
+      "",
+      `Final exams run ${dateMark(`${emailDateWithDay(finals.from)} – ${emailDateWithDay(finals.to)}`)}. Your regular class times don't apply then, so please ${bold("add the times of your finals")} on the lab's Member Portal, so nobody schedules you during an exam.`,
+      "",
+      `Go to ${bold("Schedules → Update your Availability → Request time off")} and add each exam for part of a day, or drag across its time on the Lab Calendar and choose ${bold("Doesn't repeat")}: ${CONFIG.siteUrl}`,
+      "",
+      reminder ? "If none of your finals clash with the lab, you can ignore this." : "If none of your finals clash with the lab, there's nothing to add.",
+    ],
+  };
+}
+
+// Kept free of Google services so it can be tested on its own. Returns the emails due today, one per RA, and any
+// lists of missing schedules for lab managers.
+function labMemberReminders(site, profiles, changeRequests, todayIso, noClasses = []) {
+  const { semesters, events } = site.academic;
+  const main = semesters.filter((semester) => CONFIG.scheduleSemesters.some((prefix) => semester.id.startsWith(prefix)))
+    .sort((a, b) => a.classesBegin.localeCompare(b.classesBegin));
+  const profileOf = (email) => profiles.find((profile) => profile.id === email) || null;
+  const toRas = [];
+  const missing = [];
+  main.forEach((semester, index) => {
+    const next = main[index + 1];
+    if (next) {
+      const month = next.classesBegin.slice(0, 7);
+      const without = site.members.filter((member) => studentRa(member, profileOf(member.id), month)
+        && !hasClassSchedule(member.id, next, site.data.availability, changeRequests, noClasses));
+      const first = monthBefore(semesterEnd(semester, events));
+      const since = daysBetween(first, todayIso);
+      if (since >= 0 && since % 14 === 0 && todayIso < next.classesBegin) {
+        const greeting = semesterGreeting(semester, events, todayIso);
+        for (const member of without) toRas.push({ to: member.id, ...scheduleReminderEmail(member.name, next, greeting, since > 0) });
+      }
+      if (todayIso === addDaysIso(next.classesBegin, -7) && without.length) missing.push({ semester: next, people: without });
+    }
+    const finals = finalsOf(semester, events);
+    if (finals && [14, 7].includes(daysBetween(todayIso, finals.from))) {
+      const reminder = daysBetween(todayIso, finals.from) === 7;
+      const month = finals.from.slice(0, 7);
+      for (const member of site.members) {
+        if (studentRa(member, profileOf(member.id), month) && !hasFinalsTimes(member.id, finals, site.data, changeRequests)) {
+          toRas.push({ to: member.id, ...finalsEmail(member.name, semester, finals, reminder) });
+        }
+      }
+    }
+  });
+  return { toRas, missing };
+}
+
+function missingSchedulesEmail(semester, people) {
+  return {
+    subject: `Lab schedule: ${people.length} RA${people.length === 1 ? " hasn't" : "s haven't"} added their ${semester.name} schedule`,
+    lines: [
+      `${semester.name} classes start ${dateMark(emailDateWithDay(semester.classesBegin))}, and ${people.length === 1 ? "this RA hasn't" : "these RAs haven't"} added their class schedule yet:`,
+      "",
+      ...people.map((person) => `• ${bold(person.name)} (${person.id})`),
+      "",
+      CONFIG.emailLabMembers ? "They've been reminded every two weeks since a month before last semester ended." : "Lab member emails are switched off for now, so they haven't been reminded.",
+      `You can add it for them under ${bold("Lab Management → Lab members → Edit schedule")}: ${CONFIG.siteUrl}`,
+    ],
+  };
+}
+
+function remindLabMembers(site, profiles, changeRequests, today, noClasses = listCollection("noClasses")) {
+  const { toRas, missing } = labMemberReminders(site, profiles, changeRequests, isoOf(today), noClasses);
+  if (CONFIG.emailLabMembers) for (const email of toRas) sendEmail(email);
+  else if (toRas.length) console.log(`${toRas.length} schedule reminder(s) due; lab member emails are switched off, so none were sent.`);
+  for (const { semester, people } of missing) {
+    emailReviewers(site.rules, site.members, "missingSchedules", [{ id: semester.id, owner: null }], () => missingSchedulesEmail(semester, people));
+  }
+  return { emailed: CONFIG.emailLabMembers ? toRas.length : 0, missing: missing.length };
+}
+
+// --- Keeping the USC calendars current ---
+// From the start of the last semester the academic calendar covers (and the start of the last year of staff
+// holidays), lab managers are asked to add the next dates under Website management, then monthly until they do.
+
+// Kept free of Google services so it can be tested on its own.
+function calendarDataNeeds(academic, holidays, todayIso) {
+  const needs = [];
+  const lastSemester = [...academic.semesters].sort((a, b) => a.classesBegin.localeCompare(b.classesBegin)).pop();
+  if (lastSemester && todayIso >= lastSemester.classesBegin) {
+    needs.push(`The USC academic calendar only goes through ${bold(lastSemester.name)} (classes end ${dateMark(emailDateWithDay(lastSemester.classesEnd))}).`);
+  }
+  const lastHoliday = [...holidays].sort((a, b) => a.to.localeCompare(b.to)).pop();
+  if (lastHoliday && todayIso >= `${lastHoliday.from.slice(0, 4)}-01-01`) {
+    needs.push(`The USC staff holidays only go through ${dateMark(emailDateWithDay(lastHoliday.to))}.`);
+  }
+  return needs;
+}
+
+function calendarDataEmail(needs) {
+  return {
+    subject: "Lab schedule: please add the next USC calendar dates",
+    lines: [
+      `The USC dates on the lab's Member Portal are ${bold(underline("running out"))}:`,
+      "",
+      ...needs.map((need) => `• ${need}`),
+      "",
+      `Please add the next year's dates under ${bold("Lab Management → Website management")}: ${CONFIG.siteUrl}#website`,
+      "Until they're added, classes aren't limited to semester dates and visits could be scheduled on staff holidays.",
+      "",
+      "USC's academic calendar: https://usc.edu/academic-calendar/",
+      "We'll remind you monthly until they're in.",
+    ],
+  };
+}
+
+function remindCalendarData(site, today) {
+  const todayIso = isoOf(today);
+  const needs = calendarDataNeeds(site.academic, site.holidays, todayIso);
+  const properties = PropertiesService.getScriptProperties();
+  if (!needs.length) {
+    properties.deleteProperty("calendarDataReminder");
+    return false;
+  }
+  const last = properties.getProperty("calendarDataReminder");
+  if (last && monthBefore(todayIso) < last) return false;
+  emailReviewers(site.rules, site.members, "websiteUpdates", [{ id: "calendars", owner: null }], () => calendarDataEmail(needs));
+  properties.setProperty("calendarDataReminder", todayIso);
+  return true;
+}
+
 // --- Birthdays and graduations ---
-// Profiles hold { birthday: "YYYY-MM-DD", graduation: "YYYY-MM" or "n/a", color, dessert, dietary }. Only lab
+// Profiles hold { birthday: "MM-DD", graduation: "YYYY-MM" or "n/a", color, dessert, dietary }. Only lab
 // managers see these: in LCL Birthdays & Graduations, and in reminder emails 1 month, 1 week and 1 day before, and on
 // the morning of. A graduation is marked on the first of its month, since only the month is known.
 
@@ -409,9 +713,9 @@ function monthBefore(iso) {
   return isoOf(new Date(year, month - 2, Math.min(day, lastDay)));
 }
 
-// A Feb 29 birthday is marked on Feb 28 in other years.
+// Birthdays are "MM-DD" (older ones "YYYY-MM-DD"). A Feb 29 birthday is marked on Feb 28 in other years.
 function birthdayIn(birthday, year) {
-  const [, month, day] = birthday.split("-").map(Number);
+  const [month, day] = birthday.slice(-5).split("-").map(Number);
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
   if (month === 2 && day === 29 && !leap) return `${year}-02-28`;
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
@@ -470,15 +774,24 @@ function buildCelebrationEvents(profiles, nameOf, today) {
   return celebrationsBetween(profiles, nameOf, todayIso, addDaysIso(todayIso, 364)).map((item) => ({
     key: `${item.kind}:${item.email}:${item.iso}`,
     title: celebrationTitle(item),
-    description: [...favoritesLines(item.profile), "", `From the Lifespan Cognition Lab Schedule: ${CONFIG.siteUrl}`].join("\n"),
+    description: [...favoritesLines(item.profile), "", `From the Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}`].join("\n"),
     start: dateAt(item.iso, "00:00"),
     end: dateAt(addDaysIso(item.iso, 1), "00:00"),
     allDay: item.iso,
   }));
 }
 
-function syncCelebrations(site, profiles, today) {
-  const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;
+// First and last name, from the lab list and the directory.
+function fullNameOf(site, directory) {
+  return (email) => {
+    const first = (site.members.find((member) => member.id === email) || {}).name || email;
+    const last = (directory.find((entry) => entry.id === email) || {}).lastName;
+    return last ? `${first} ${last}` : first;
+  };
+}
+
+function syncCelebrations(site, profiles, today, directory = listCollection("directory")) {
+  const nameOf = fullNameOf(site, directory);
   // Profiles of people no longer on the lab list are left out.
   const current = profiles.filter((profile) => site.members.some((member) => member.id === profile.id));
   const wanted = buildCelebrationEvents(current, nameOf, today);
@@ -496,15 +809,15 @@ function celebrationsEmail(items) {
   const lines = [];
   for (const item of items) {
     const date = item.kind === "birthday" ? emailDateWithDay(item.iso) : `${graduationText(item.profile.graduation)}, marked on ${emailDateWithDay(item.iso)}`;
-    lines.push(`${celebrationTitle(item)}: ${item.when} (${date})`, ...favoritesLines(item.profile).map((line) => `  ${line}`), "");
+    lines.push(`${bold(celebrationTitle(item))}: ${highlight(bold(item.when))} (${bold(date)})`, ...favoritesLines(item.profile).map((line) => `  ${line.replace(/^([^:]+:)/, (label) => bold(label))}`), "");
   }
   lines.push(`See everyone's details in the Lab Directory: ${CONFIG.siteUrl}`);
   return { subject, lines };
 }
 
 // Lab managers get one email a morning with any reminders due. Nobody is reminded about their own.
-function remindCelebrations(site, profiles, today) {
-  const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;
+function remindCelebrations(site, profiles, today, directory = listCollection("directory")) {
+  const nameOf = fullNameOf(site, directory);
   const current = profiles.filter((profile) => site.members.some((member) => member.id === profile.id));
   const due = celebrationReminders(current, nameOf, isoOf(today)).map((item) => ({ ...item, id: `${item.kind}:${item.email}`, owner: item.email }));
   return emailReviewers(site.rules, site.members, "celebrations", due, celebrationsEmail);
@@ -687,35 +1000,6 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
   return events;
 }
 
-// When each lab member can't be in the lab: classes, standing conflicts and time off, each person in their own color.
-// Kept free of Google services so it can be tested on its own.
-function buildUnavailabilityEvents(rules, data, today) {
-  const events = [];
-  const nameOf = (email) => (data.members.find((member) => member.email === email) || {}).name || email;
-  const colorOf = (email) => String((Math.max(0, data.members.findIndex((member) => member.email === email)) % 11) + 1);
-  for (let offset = 0; offset <= CONFIG.daysAhead; offset++) {
-    const iso = isoOf(new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset));
-    for (const block of rules.unavailableOn(iso, data)) {
-      const name = nameOf(block.email);
-      let title;
-      if (block.kind === "class") title = `${name}: class`;
-      else if (block.kind === "conflict") title = `${name}: ${block.note || "standing conflict"}`;
-      else title = `${name}: time off${block.pending ? " (waiting for review)" : ""}${block.note ? `, ${block.note}` : ""}`;
-      const allDay = !block.start;
-      events.push({
-        key: `${block.kind}:${block.id}:${iso}`,
-        title,
-        description: `Can't be in the lab. From the Lifespan Cognition Lab Schedule: ${CONFIG.siteUrl}`,
-        start: allDay ? dateAt(iso, "00:00") : dateAt(iso, block.start),
-        end: allDay ? dateAt(isoOf(new Date(dateAt(iso, "12:00").getTime() + 86400000)), "00:00") : dateAt(iso, block.end),
-        allDay: allDay ? iso : null,
-        color: colorOf(block.email),
-      });
-    }
-  }
-  return events;
-}
-
 // Two events per staffed visit: one for the whole visit (4 hours from the start), for the lab staff and lab manager,
 // and one for the scan, for the scanners. Staff who are only needed for part of the visit are told their own times.
 // Kept free of Google services so it can be tested on its own.
@@ -761,7 +1045,7 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
           "Lab staff are only needed for their own times above and don't need to come back after the scan; a lab manager finishes the visit.",
           ...(appointment.scan ? ["Scanners have a separate invite for the scan."] : []),
           "",
-          `Staffing on the Lifespan Cognition Lab Schedule: ${CONFIG.siteUrl}#visit=${doc.visitKey}`,
+          `Staffing on the Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}#visit=${doc.visitKey}`,
         ].join("\n"),
         start: dateAtMinutes(doc.date, window.start),
         end: dateAtMinutes(doc.date, window.end),
@@ -783,7 +1067,7 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
           ...assigned.scan.map((line) => `• ${line}`),
           ...(appointment.scan.wandingRequired === false ? ["", "Wanding/taping isn't required for this visit."] : []),
           "",
-          `Lifespan Cognition Lab Schedule: ${CONFIG.siteUrl}`,
+          `Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}`,
         ].join("\n"),
         start: dateAt(doc.date, appointment.scan.start),
         end: dateAt(doc.date, appointment.scan.end),
@@ -800,7 +1084,7 @@ function syncConfirmed(site = loadSite(), staffing = listCollection("staffing"),
   const wanted = buildConfirmedEvents(site.rules, site.data, site.appointments, site.holidays, staffing, today)
     .map((event) => (CONFIG.inviteStaff ? event : { ...event, attendees: [] }));
   const calendarId = calendarIdFor("confirmedCalendarId", CONFIG.confirmedCalendarName,
-    "Staffed participant visits, from the Lifespan Cognition Lab Schedule. Filled in automatically every 10 minutes.");
+    "Staffed participant visits, from the Lifespan Cognition Lab Member Portal. Filled in automatically every 10 minutes.");
   const changes = writeCalendar(calendarId, wanted, today, 120);
   if (changes.created || changes.updated || changes.deleted) {
     console.log(`Confirmed Visits synced: ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
@@ -879,22 +1163,23 @@ const STAFF_SUBJECTS = {
 
 function staffEmail(rules, name, changes) {
   const lines = [`Hi ${name},`, ""];
+  const roles = (list) => list.map((role) => bold(highlight(role))).join("; ");
   for (const change of changes) {
-    const date = emailDateWithDay(change.visit.date);
+    const date = dateMark(emailDateWithDay(change.visit.date));
     if (change.type === "assigned") {
-      lines.push(`You're staffing a participant visit on ${date} (whole visit ${change.visit.visit}).`, `Your role: ${change.roles.join("; ")}`);
+      lines.push(`You're staffing a participant visit on ${date} (whole visit ${change.visit.visit}).`, `${bold("Your role:")} ${roles(change.roles)}`);
     } else if (change.type === "changed") {
-      lines.push(`Your times changed for the participant visit on ${date} (whole visit ${change.visit.visit}).`,
-        `Before: ${change.was.join("; ")}${change.oldVisit.date !== change.visit.date ? ` on ${emailDateWithDay(change.oldVisit.date)}` : ""}`,
-        `Now: ${change.roles.join("; ")}`);
+      lines.push(`Your times ${bold(underline("changed"))} for the participant visit on ${date} (whole visit ${change.visit.visit}).`,
+        `${bold(underline("Before:"))} ${change.was.join("; ")}${change.oldVisit.date !== change.visit.date ? ` on ${emailDateWithDay(change.oldVisit.date)}` : ""}`,
+        `${bold(underline("Now:"))} ${roles(change.roles)}`);
     } else if (change.type === "removed") {
-      lines.push(`You're no longer staffing the participant visit on ${date}. You were down for: ${change.roles.join("; ")}.`);
+      lines.push(`You're ${bold(underline("no longer"))} staffing the participant visit on ${date}. You were down for: ${change.roles.join("; ")}.`);
     } else {
-      lines.push(`The participant visit on ${date} (${change.visit.visit}) has been cancelled. You were down for: ${change.roles.join("; ")}.`);
+      lines.push(`The participant visit on ${date} (${change.visit.visit}) has been ${bold(underline("cancelled"))}. You were down for: ${change.roles.join("; ")}.`);
     }
     const current = change.type === "assigned" || change.type === "changed";
     if (current && (change.seeTime || []).length) {
-      lines.push(`${rules.SEE_TIME} These aren't the usual times, so please check yours:`, ...change.seeTime.map((note) => `• ${note}`));
+      lines.push(`${highlight(bold(rules.SEE_TIME))} These ${bold("aren't the usual times")}, so please check yours:`, ...change.seeTime.map((note) => `• ${bold(note)}`));
     }
     lines.push("");
   }
@@ -902,7 +1187,7 @@ function staffEmail(rules, name, changes) {
   const first = changes[0];
   const seeTime = changes.some((change) => (change.type === "assigned" || change.type === "changed") && (change.seeTime || []).length);
   const subject = changes.length === 1 ? STAFF_SUBJECTS[first.type](emailDateWithDay(first.visit.date)) : `Lab visits: ${changes.length} updates for you`;
-  return { subject: `${subject}${seeTime ? ` ${rules.SEE_TIME}` : ""}`, body: lines.join("\n") };
+  return { subject: `${subject}${seeTime ? ` ${rules.SEE_TIME}` : ""}`, lines };
 }
 
 // Staff can't turn these off: they carry the times people need. Nothing is sent, or remembered, until
@@ -921,8 +1206,7 @@ function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), t
   const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;
   let emailed = 0;
   for (const [email, theirs] of Object.entries(changes)) {
-    const { subject, body } = staffEmail(rules, nameOf(email), theirs);
-    MailApp.sendEmail({ to: email, subject, body });
+    sendEmail({ to: email, ...staffEmail(rules, nameOf(email), theirs) });
     emailed++;
   }
   for (const key of Object.keys(before)) if (!after[key]) properties.deleteProperty(`staff:${key}`);
@@ -932,32 +1216,43 @@ function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), t
 }
 
 // --- Test emails ---
-// Run sendTestEmails from the Apps Script editor to see one sample of every email the lab sends. They all go to
+// Run sendTestEmails from the Apps Script editor to see one sample of every email the lab sends (the booker's comes
+// from the site, so it's shown here as the plain text it drafts). They all go to
 // CONFIG.testEmailsTo alone, with [TEST] in the subject, using made-up people and visits; nobody else is emailed and
 // nothing is saved.
 function sendTestEmails() {
   const rules = loadRules();
   const to = CONFIG.testEmailsTo;
-  const send = (audience, subject, body) => MailApp.sendEmail({ to, subject: `[TEST] ${subject}`, body: `(Test email: this is what ${audience} get.)\n\n${body}` });
+  let sent = 0;
+  const send = (audience, { subject, lines, footer = [] }) => {
+    sendEmail({ to, subject: `[TEST] ${subject}`, lines: [`(Test email: this is what ${audience} get.)`, "", ...lines], footer });
+    sent++;
+  };
   const reviewers = [{ name: "Alex" }, { name: "Sam" }];
-  const toReviewers = ({ subject, lines }) => send("lab managers", subject, reviewerBody(reviewers, lines));
-  const nameOf = (email) => ({ "jordan@usc.edu": "Jordan", "taylor@usc.edu": "Taylor" }[email] || email);
-  const profile = { birthday: "2001-12-10", graduation: "2027-05", color: "Teal", dessert: "Tiramisu", dietary: "Tree nut allergy" };
+  const toReviewers = ({ subject, lines }) => send("lab managers", { subject, lines: reviewerLines(reviewers, lines), footer: [EMAIL_FOOTER] });
+  const nameOf = (email) => ({ "jordan@usc.edu": "Jordan", "taylor@usc.edu": "Taylor", "alex@usc.edu": "Alex" }[email] || email);
+  const profile = { birthday: "12-10", graduation: "2027-05", color: "Teal", dessert: "Tiramisu", dietary: "Tree nut allergy" };
   const usual = { lab: { start: "09:00", end: "11:00" }, scan: { start: "11:00", end: "13:00", wandingRequired: true } };
   const early = { lab: { start: "09:00", end: "10:00" }, scan: { start: "10:00", end: "12:00", wandingRequired: true } };
+  const spring = { id: "spring-2027", name: "Spring 2027", classesBegin: "2027-01-11", classesEnd: "2027-04-30" };
 
   toReviewers(requestsEmail([
-    { owner: "jordan@usc.edu", text: "Time off: Jan 20, 2027, 2:00 PM – 4:00 PM (Doctor's appointment)" },
+    { owner: "jordan@usc.edu", text: `Time off: ${describeTimeOffForEmail({ from: "2027-01-20", to: "2027-01-20", start: "14:00", end: "16:00", note: "Doctor's appointment" })}` },
     { owner: "taylor@usc.edu", text: 'Schedule change: Add "Unavailable, standing conflict (Lab meeting): Fri, 1:00 PM – 2:00 PM"' },
   ], nameOf));
   toReviewers(updatesEmail([{ owner: "taylor@usc.edu", text: "Time off: Feb 3, 2027 (Conference)" }], nameOf));
   toReviewers(cancellationsEmail(rules, [{ key: "default-2027-01-12", kind: "booking", visit: { date: "2027-01-12", times: "9:00 AM – 1:00 PM", by: "Jordan", seeTime: false } }]));
   toReviewers(cancellationsEmail(rules, [{ key: "x", kind: "visit", visit: { date: "2027-01-14", times: "9:00 AM – 1:00 PM", seeTime: true } }]));
   toReviewers(scanReminderEmail(rules, "2027-01-12", usual));
-  toReviewers(celebrationsEmail([{ iso: "2026-12-10", kind: "birthday", name: "Jordan", profile, when: "in 1 week" }]));
+  toReviewers(celebrationsEmail([{ iso: "2026-12-10", kind: "birthday", name: "Jordan Lee", profile, when: "in 1 week" }]));
   toReviewers(celebrationsEmail([
-    { iso: "2026-12-10", kind: "birthday", name: "Jordan", profile, when: "today" },
-    { iso: "2027-05-01", kind: "graduation", name: "Taylor", profile: { ...profile, dietary: "Vegetarian" }, when: "in 1 month" },
+    { iso: "2026-12-10", kind: "birthday", name: "Jordan Lee", profile, when: "today" },
+    { iso: "2027-05-01", kind: "graduation", name: "Taylor Kim", profile: { ...profile, dietary: "Vegetarian" }, when: "in 1 month" },
+  ]));
+  toReviewers(missingSchedulesEmail(spring, [{ id: "jordan@usc.edu", name: "Jordan" }, { id: "taylor@usc.edu", name: "Taylor" }]));
+  toReviewers(calendarDataEmail([
+    `The USC academic calendar only goes through ${bold("Summer 2029")} (classes end ${dateMark("Tue, Aug 7, 2029")}).`,
+    `The USC staff holidays only go through ${dateMark("Tue, Jan 1, 2030")}.`,
   ]));
 
   const booker = rules.bookingEmail({
@@ -966,22 +1261,27 @@ function sendTestEmails() {
     seeTime: rules.unusualTimes(early),
     link: `${CONFIG.siteUrl}#visit=default-2027-01-12`,
   });
-  send("reviewers from a booker (the site drafts it in the booker's own email; they fill in the Screener ID)", booker.subject, booker.body);
+  send("reviewers from a booker (the site drafts it in the booker's own email, as plain text; they fill in the Screener ID)", { subject: booker.subject, lines: booker.body.split("\n") });
 
   const visit = { date: "2027-01-12", visit: "9:00 AM – 1:00 PM", people: {} };
   const roles = ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:30 AM–11:30 AM"];
   // Lab staff only hear about the lab portion's unusual times.
   const seeTime = rules.unusualTimes(early, "lab");
-  const staffSample = (changes) => {
-    const { subject, body } = staffEmail(rules, "Jordan", changes);
-    send("staff (once staff emails are switched on)", subject, body);
-  };
+  const staffSample = (changes) => send("staff (once staff emails are switched on)", staffEmail(rules, "Jordan", changes));
   staffSample([{ type: "assigned", visit, roles, seeTime }]);
   staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:45 AM–11:45 AM"], was: roles, oldVisit: visit, seeTime }]);
   staffSample([{ type: "removed", visit, roles }]);
   staffSample([{ type: "cancelled", visit, roles }]);
   staffSample([{ type: "assigned", visit, roles, seeTime }, { type: "cancelled", visit: { ...visit, date: "2027-01-14" }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);
-  console.log(`Sent 13 test emails to ${to}.`);
+
+  const toMember = "RAs and other lab members (once lab member emails are switched on)";
+  send(toMember, reviewResultEmail({ kind: "timeOff", ownerEmail: "jordan@usc.edu", reviewedBy: "alex@usc.edu", status: "approved", from: "2027-01-20", to: "2027-01-20", start: "14:00", end: "16:00", note: "Doctor's appointment", reviewNote: "Feel better!" }, nameOf));
+  send(toMember, reviewResultEmail({ kind: "changeRequests", ownerEmail: "jordan@usc.edu", reviewedBy: "alex@usc.edu", status: "declined", summary: 'Remove "Unavailable, class: Mon, 9:00 AM – 10:00 AM"', reviewNote: "That class is still on your schedule." }, nameOf));
+  send(toMember, scheduleReminderEmail("Jordan", spring, "Happy (almost) end of the semester! 🎉 Good luck with finals!", false));
+  send(toMember, scheduleReminderEmail("Jordan", spring, "Hope you're having a nice break :)", true));
+  send(toMember, finalsEmail("Jordan", { name: "Fall 2026" }, { from: "2026-12-09", to: "2026-12-16" }, false));
+  send(toMember, finalsEmail("Jordan", { name: "Fall 2026" }, { from: "2026-12-09", to: "2026-12-16" }, true));
+  console.log(`Sent ${sent} test emails to ${to}.`);
 }
 
 // --- Writing the calendars ---

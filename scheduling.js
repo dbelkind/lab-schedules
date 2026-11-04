@@ -21,10 +21,17 @@ const REVIEWER_EMAILS = [
   { key: "updates", label: "Saved schedule changes", help: "Changes and time off that Grad Students/Post-Docs save without review." },
   { key: "cancellations", label: "Cancellations", help: "Straight away when a booking is cancelled (the visit stays open to rebook), or a booked or staffed visit is cancelled. Bookings themselves come from the booker's own email." },
   { key: "scanReminders", label: "Scan booking reminder", help: "At 8:30 AM each morning, which newly opened visit needs its scan booked." },
+  { key: "missingSchedules", label: "Missing class schedules", help: "A week before a semester starts, which RAs still haven't added their class schedule." },
+  { key: "websiteUpdates", label: "Website updates", help: "When the USC academic calendar or staff holidays need the next year's dates added, then monthly until they're in." },
   { key: "celebrations", label: "Birthdays and graduations", help: "At 8:30 AM, 1 month, 1 week and 1 day before, and on the day, with their favorite color, dessert and dietary restrictions/allergies." },
 ];
 // What each person is in the lab directory. It's only a label: what someone can do on the site comes from their role.
 const DIRECTORY_TITLES = ["RA", "PhD Student", "Post-Doc", "Lab Manager", "PI"];
+
+// Birthdays are kept as "MM-DD", without the year. Ones saved before that ("YYYY-MM-DD") read the same way.
+function birthdayMonthDay(birthday) {
+  return String(birthday || "").slice(-5);
+}
 
 // Someone whose directory role hasn't been chosen yet gets one from their site role. firestore.rules matches this.
 function titleOf(member) {
@@ -188,8 +195,8 @@ function freeBetween(person, from, to) {
   return person.isFree ? person.isFree(from, to) : true;
 }
 
-// The stretches of [from, to] someone is free, such as "9:30 AM–10:30 AM".
-function freeStretches(person, from, to) {
+// The stretches of [from, to] someone is free, as [start, end] in minutes.
+function freeIntervals(person, from, to) {
   const stretches = [];
   let runStart = null;
   for (let minute = from; minute < to; minute += TIMING_STEP_MINUTES) {
@@ -201,7 +208,12 @@ function freeStretches(person, from, to) {
     }
   }
   if (runStart !== null) stretches.push([runStart, to]);
-  return stretches.map(([start, end]) => `${clockTime(start)}–${clockTime(end)}`);
+  return stretches;
+}
+
+// The same, as text such as "9:30 AM–10:30 AM".
+function freeStretches(person, from, to) {
+  return freeIntervals(person, from, to).map(([start, end]) => `${clockTime(start)}–${clockTime(end)}`);
 }
 
 // Wet Lab takes 2 hours and has to start no more than 30 minutes after phlebotomy ends. It may run past the slot.
@@ -386,20 +398,6 @@ function isBusyDuring(email, iso, startMinutes, endMinutes, data) {
     request.ownerEmail === email && request.status !== "declined" && request.from <= iso && iso <= request.to &&
     (!request.start || (timeToMinutes(request.start) < endMinutes && startMinutes < timeToMinutes(request.end))));
   return inClassOrConflict || away;
-}
-
-// Everyone's unavailable times on a date, as { id, email, kind: "class" | "conflict" | "timeOff", start, end, note,
-// pending }. Whole days off have no start or end.
-function unavailableOn(iso, data) {
-  const weekday = WEEKDAY_NAMES[isoWeekday(iso)];
-  const classesMeet = classesMeetOn(iso, data.semesters, data.events);
-  const entries = data.availability
-    .filter((block) => block.from <= iso && (!block.to || iso <= block.to) && block.days.includes(weekday) && (block.type !== "class" || classesMeet))
-    .map((block) => ({ id: block.id, email: block.ownerEmail, kind: block.type, start: block.start, end: block.end, note: block.note || "", pending: false }));
-  const away = data.timeOff
-    .filter((request) => request.status !== "declined" && request.from <= iso && iso <= request.to)
-    .map((request) => ({ id: request.id, email: request.ownerEmail, kind: "timeOff", start: request.start || null, end: request.end || null, note: request.note || "", pending: request.status === "pending" }));
-  return [...entries, ...away];
 }
 
 function peopleAvailable(iso, start, end, data) {
@@ -727,7 +725,7 @@ function bookingEmail({ when, parts, seeTime, link }) {
       "Screener ID: ",
       "",
       "For reviewers:",
-      "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab schedule website.",
+      "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab's Member Portal website.",
       `2. Review the suggested staffing and approve it to confirm the visit: ${link}`,
       "   Approving the staffing sends the staff their calendar invites and emails automatically.",
     ].join("\n"),

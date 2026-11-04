@@ -65,8 +65,23 @@ let bookingFilter = "open";
 let myProfile = null;
 let directory = [];
 let profiles = [];
+let privatePhones = [];
+// [{ email, semesters }]: who has said they have no classes in which semesters.
+let noClasses = [];
+// The USC calendars as lab managers last saved them, with who saved them, when they have.
+let calendarSettings = { academic: null, holidays: null };
 // True until someone has filled in their profile the first time they sign in.
 let onboarding = false;
+let directoryTab = "all";
+let directorySort = { key: "name", dir: 1 };
+let detailsSort = { key: "name", dir: 1 };
+// The roles ticked on the Availability calendar's filter, by leaf key.
+let availabilityRoles = new Set();
+let reviewFilter = "pending";
+// How many requests are waiting, straight from the database as they come in; null until it's first heard.
+let livePending = null;
+let stopWatchingPending = null;
+let pendingRefreshTimer = null;
 let weekLayout = { firstHour: 8, lastHour: 18 };
 
 function el(tag, className, text) {
@@ -210,7 +225,9 @@ function canEditEntriesOf(email) {
 }
 
 function renderFilters() {
-  filtersEl.replaceChildren(...members.map((member) => {
+  // On Availability, only people matching the role filter get a chip.
+  const chipMembers = isAvailabilityView() ? members.filter(matchesRoleFilter) : members;
+  filtersEl.replaceChildren(...chipMembers.map((member) => {
     const chip = el("button", "chip");
     chip.type = "button";
     chip.style.setProperty("--member", member.color);
@@ -223,7 +240,9 @@ function renderFilters() {
     });
     return chip;
   }));
-  filtersEl.hidden = !isReviewer() || calendarView === "lab";
+  filtersEl.hidden = !isReviewer() || calendarView === "lab" || calendarView === "checker";
+  document.getElementById("role-filters").hidden = !isAvailabilityView();
+  if (isAvailabilityView()) renderRoleFilters();
   document.getElementById("empty").hidden = blocks.length > 0;
 }
 
@@ -290,15 +309,24 @@ function isLabView() {
   return calendarView === "lab" && isReviewer();
 }
 
+function isAvailabilityView() {
+  return calendarView === "availability" && isReviewer();
+}
+
+function isCheckerView() {
+  return calendarView === "checker" && isReviewer();
+}
+
 function renderWeek() {
   const colorOf = new Map(members.map((member) => [member.name, member.color]));
   const today = startOfDay(new Date());
   const weekDates = Array.from({ length: 7 }, (_, index) => addDays(startOfWeek(selected), index));
   weekLabelEl.textContent = formatWeekLabel(weekDates[0], weekDates[6]);
   const labView = isLabView();
+  const availabilityView = isAvailabilityView();
 
   // The hours stay the same from week to week, so the grid doesn't jump around while navigating.
-  const timed = labView
+  const timed = availabilityView ? [] : labView
     ? [DEFAULT_SLOTS.lab, DEFAULT_SLOTS.scan, ...appointments.flatMap((appointment) => [appointment.lab, appointment.scan]).filter(Boolean)]
     : blocks.filter((block) => block.type !== "ooo" || block.start);
   const firstHour = Math.min(8, ...timed.map((block) => Math.floor(toMinutes(block.start) / 60)));
@@ -306,6 +334,7 @@ function renderWeek() {
   weekLayout = { firstHour, lastHour };
   calendarEl.style.setProperty("--hour-count", lastHour - firstHour);
   calendarEl.classList.toggle("lab-view", labView);
+  calendarEl.classList.toggle("availability-view", availabilityView);
 
   const headers = weekDates.map((date) => {
     const header = el("div", `day-header${sameDay(date, today) ? " today" : ""}`);
@@ -313,7 +342,11 @@ function renderWeek() {
     return header;
   });
 
-  const allDayCells = weekDates.map((date) => (labView ? labAllDay(dateToIso(date)) : unavailabilityAllDay(dateToIso(date), colorOf)));
+  const allDayCells = weekDates.map((date) => {
+    const iso = dateToIso(date);
+    if (labView) return labAllDay(iso);
+    return availabilityView ? availabilityAllDay(iso) : unavailabilityAllDay(iso, colorOf);
+  });
 
   const hours = el("div", "hours");
   for (let hour = firstHour; hour < lastHour; hour++) {
@@ -324,15 +357,141 @@ function renderWeek() {
 
   const columns = weekDates.map((date) => {
     const iso = dateToIso(date);
-    const offDay = labView ? Boolean(staffHolidayOn(iso, staffHolidays)) : isDayOff(iso);
+    const offDay = labView || availabilityView ? Boolean(staffHolidayOn(iso, staffHolidays)) : isDayOff(iso);
     const column = el("div", `day${sameDay(date, today) ? " today" : ""}${offDay ? " day-off" : ""}`);
     if (labView) renderLabColumn(column, iso);
+    else if (availabilityView) renderAvailabilityColumn(column, iso, colorOf);
     else renderUnavailabilityColumn(column, date, colorOf);
-    enableCreate(column, iso, labView ? openNewVisitDialog : openNewConflictDialog);
+    if (!availabilityView) enableCreate(column, iso, labView ? openNewVisitDialog : openNewConflictDialog);
     return column;
   });
 
   calendarEl.replaceChildren(el("div", "corner"), ...headers, el("div", "all-day-gutter"), ...allDayCells, hours, ...columns);
+}
+
+// --- The Availability calendar (reviewers only) ---
+// The opposite of Unavailability: each block is a time someone has nothing on their schedule. A role filter, with
+// groups inside groups, narrows it to people who can do certain things.
+
+const AVAILABILITY_FILTERS = [
+  { key: "managers", label: "Lab managers", matches: (person) => person.role === "reviewer" },
+  { key: "lab", label: "Lab portion", children: [
+    { key: "Dry Lab", label: "Dry Lab" },
+    { key: "Wet Lab", label: "Wet Lab" },
+    { key: "phlebotomy", label: "Phlebotomy", children: PHLEBOTOMY_LEVELS.map((level) => ({ key: level, label: level })) },
+  ] },
+  { key: "scanning", label: "Scanning", children: [
+    { key: "Level 2 Scanning", label: "Level 2" },
+    { key: "Level 1 Scanning", label: "Level 1" },
+    { key: "Auxiliary Support Scanning", label: "Auxiliary Support" },
+    { key: "Wanding/Taping", label: "Wanding/Taping" },
+  ] },
+  { key: "Booking", label: "Booking" },
+];
+
+function filterLeaves(node) {
+  return node.children ? node.children.flatMap(filterLeaves) : [node];
+}
+
+function leafMatches(leaf, person) {
+  return leaf.matches ? leaf.matches(person) : (person.skills || []).includes(leaf.key);
+}
+
+// Nothing ticked shows everyone; otherwise anyone who can do any of the ticked things.
+function matchesRoleFilter(person) {
+  if (!availabilityRoles.size) return true;
+  return AVAILABILITY_FILTERS.flatMap(filterLeaves).some((leaf) => availabilityRoles.has(leaf.key) && leafMatches(leaf, person));
+}
+
+// A group's box is ticked when everything in it is, and half-ticked when some of it is.
+function filterBox(node) {
+  const leaves = filterLeaves(node);
+  const picked = leaves.filter((leaf) => availabilityRoles.has(leaf.key)).length;
+  const label = el("label", `role-option${node.children ? " role-group-label" : ""}`);
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = picked === leaves.length;
+  box.indeterminate = picked > 0 && picked < leaves.length;
+  box.addEventListener("change", () => {
+    const pickAll = picked < leaves.length;
+    for (const leaf of leaves) {
+      if (pickAll) availabilityRoles.add(leaf.key);
+      else availabilityRoles.delete(leaf.key);
+    }
+    renderFilters();
+    renderWeek();
+  });
+  const count = members.filter((member) => leaves.some((leaf) => leafMatches(leaf, member))).length;
+  label.append(box, el("span", "", node.label), el("span", "role-count", String(count)));
+  const item = el("li");
+  item.append(label);
+  if (node.children) {
+    const list = el("ul", "role-tree");
+    list.append(...node.children.map(filterBox));
+    item.append(list);
+  }
+  return item;
+}
+
+function renderRoleFilters() {
+  const panel = document.getElementById("role-filters");
+  const head = el("div", "role-filters-head");
+  const shown = members.filter(matchesRoleFilter).length;
+  head.append(el("strong", "", "Filter by role"), el("span", "muted", availabilityRoles.size ? `Showing ${shown} of ${members.length} people` : "Showing everyone"));
+  if (availabilityRoles.size) {
+    const clear = el("button", "link-button", "Clear");
+    clear.type = "button";
+    clear.addEventListener("click", () => {
+      availabilityRoles = new Set();
+      renderFilters();
+      renderWeek();
+    });
+    head.append(clear);
+  }
+  const groups = el("ul", "role-groups");
+  groups.append(...AVAILABILITY_FILTERS.map(filterBox));
+  panel.replaceChildren(head, groups);
+}
+
+function availabilityAllDay(iso) {
+  const cell = el("div", "all-day");
+  const holiday = staffHolidayOn(iso, staffHolidays);
+  if (holiday) cell.append(el("div", "event event-holiday", `Staff holiday: ${holiday.name}`));
+  for (const event of eventsOn(iso)) cell.append(el("div", `event event-${event.kind}`, event.name));
+  return cell;
+}
+
+function renderAvailabilityColumn(column, iso, colorOf) {
+  const from = weekLayout.firstHour * 60;
+  const to = weekLayout.lastHour * 60;
+  const people = candidatesOn(iso, staffingData(), (member) => !hidden.has(member.name) && matchesRoleFilter(member));
+  const items = people.flatMap((person) => freeIntervals(person, from, to)
+    .filter(([start, end]) => end - start >= SNAP_MINUTES)
+    .map(([start, end]) => ({ start: minutesToTime(start), end: minutesToTime(end), person })));
+  for (const { block, lane, laneCount } of layoutDay(items)) {
+    const times = `${formatTime(block.start)} – ${formatTime(block.end)}`;
+    const node = el("div", "entry available");
+    node.style.setProperty("--member", colorOf.get(block.person.name));
+    placeBlock(node, block.start, block.end, lane, laneCount);
+    node.title = `${block.person.name} is free ${times}`;
+    node.append(el("strong", "", block.person.name), el("div", "", times));
+    makeClickable(node, () => openAvailabilityDialog(iso, block.person));
+    column.append(node);
+  }
+}
+
+function openAvailabilityDialog(iso, person) {
+  const member = members.find((item) => item.email === person.email) || person;
+  const entry = directory.find((item) => item.email === person.email);
+  const from = weekLayout.firstHour * 60;
+  const to = weekLayout.lastHour * 60;
+  const skills = normalizeSkills(member.skills);
+  openDialog(entry && entry.lastName ? `${member.name} ${entry.lastName}` : member.name, [
+    el("p", "muted", `${formatIsoWithDay(iso)} · ${titleOf(member)}`),
+    el("p", "", `Free ${freeStretches(person, from, to).join(", ") || "at no point"} (between ${formatHour(weekLayout.firstHour)} and ${formatHour(weekLayout.lastHour)}).`),
+    el("p", "", skills.length ? `Trained in: ${skills.join(", ")}` : "No training added yet."),
+    el("p", "muted", "Free means nothing is on their schedule; check with them before counting on it."),
+  ], [closeButton()]);
 }
 
 function unavailabilityAllDay(iso, colorOf) {
@@ -971,10 +1130,14 @@ function openRequestDialog(requestId) {
 
 function openReviewTab() {
   showPage("manage");
+  reviewFilter = "pending";
+  renderReviewList();
   showManageTab("review");
 }
 
 function showManageTab(tab) {
+  // Website management is drawn when it's opened, not on every refresh, so edits in progress aren't lost.
+  if (tab === "website") renderWebsiteManagement();
   for (const button of document.querySelectorAll(".manage-tab")) {
     button.setAttribute("aria-selected", String(button.dataset.manage === tab));
     document.getElementById(`manage-${button.dataset.manage}`).hidden = button.dataset.manage !== tab;
@@ -1452,13 +1615,44 @@ function openNewVisitDialog(iso, start, end) {
 // profile only the person and the lab managers can see.
 
 // Lab managers keep the directory's names and roles in step with the lab list, including for people added before it.
+// A PI's phone number is moved out of the directory into directoryPrivate, where RAs can't read it, and back if
+// they stop being listed as PI.
 async function syncDirectory() {
-  const stale = members.filter((member) => {
+  let changed = false;
+  for (const member of members) {
     const entry = directory.find((item) => item.email === member.email);
-    return !entry || entry.name !== member.name || entry.title !== titleOf(member);
-  });
-  await Promise.all(stale.map((member) => Store.saveDirectory(member.email, { name: member.name, title: titleOf(member) })));
-  return stale.length > 0;
+    const title = titleOf(member);
+    if (!entry || entry.name !== member.name || entry.title !== title) {
+      await Store.saveDirectory(member.email, { name: member.name, title });
+      changed = true;
+    }
+    const kept = privatePhones.find((item) => item.email === member.email);
+    if (title === "PI" && entry && entry.phone) {
+      await Store.savePrivatePhone(member.email, entry.phone);
+      await Store.clearDirectoryPhone(member.email);
+      changed = true;
+    } else if (title !== "PI" && kept) {
+      await Store.saveDirectory(member.email, { phone: kept.phone });
+      await Store.deletePrivatePhone(member.email);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function myDirectoryEntry() {
+  return directory.find((item) => item.email === me.email) || null;
+}
+
+function myLastName() {
+  const entry = myDirectoryEntry();
+  return entry ? entry.lastName || "" : "";
+}
+
+function phoneOf(email) {
+  const entry = directory.find((item) => item.email === email);
+  const kept = privatePhones.find((item) => item.email === email);
+  return (entry && entry.phone) || (kept && kept.phone) || "";
 }
 
 function setProfileStatus(text, isError) {
@@ -1473,29 +1667,53 @@ function formatGraduation(graduation) {
   return `${MONTH_NAMES[month - 1]} ${year}`;
 }
 
+function formatBirthday(birthday) {
+  const [month, day] = birthdayMonthDay(birthday).split("-").map(Number);
+  return `${MONTH_NAMES[month - 1].slice(0, 3)} ${day}`;
+}
+
+// Days in a month, counting Feb 29 so it can be someone's birthday.
+function daysInMonth(month) {
+  return new Date(2024, month, 0).getDate();
+}
+
+function optionOf(value, text) {
+  const node = el("option", "", text);
+  node.value = value;
+  return node;
+}
+
+function fillBirthDays(selectedDay) {
+  const month = Number(document.getElementById("profile-birth-month").value) || 1;
+  const daySelect = document.getElementById("profile-birth-day");
+  daySelect.replaceChildren(...Array.from({ length: daysInMonth(month) }, (_, index) => optionOf(String(index + 1).padStart(2, "0"), String(index + 1))));
+  daySelect.value = selectedDay && Number(selectedDay) <= daysInMonth(month) ? selectedDay : "01";
+}
+
 function fillProfileForm() {
   const monthSelect = document.getElementById("profile-grad-month");
   const yearSelect = document.getElementById("profile-grad-year");
-  const option = (value, text) => {
-    const node = el("option", "", text);
-    node.value = value;
-    return node;
-  };
-  monthSelect.replaceChildren(option("n/a", "N/A, not a student"), ...MONTH_NAMES.map((name, index) => option(String(index + 1).padStart(2, "0"), name)));
+  monthSelect.replaceChildren(optionOf("n/a", "N/A, not a student"), ...MONTH_NAMES.map((name, index) => optionOf(String(index + 1).padStart(2, "0"), name)));
   const thisYear = new Date().getFullYear();
   const graduation = myProfile ? myProfile.graduation : "";
   const years = Array.from({ length: 9 }, (_, index) => String(thisYear + index));
   if (graduation && graduation !== "n/a" && !years.includes(graduation.slice(0, 4))) years.unshift(graduation.slice(0, 4));
-  yearSelect.replaceChildren(...years.map((year) => option(year, year)));
+  yearSelect.replaceChildren(...years.map((year) => optionOf(year, year)));
   monthSelect.value = graduation && graduation !== "n/a" ? graduation.slice(5) : "n/a";
   yearSelect.value = graduation && graduation !== "n/a" ? graduation.slice(0, 4) : String(thisYear);
   yearSelect.disabled = monthSelect.value === "n/a";
   monthSelect.onchange = () => {
     yearSelect.disabled = monthSelect.value === "n/a";
   };
-  const entry = directory.find((item) => item.email === me.email);
-  document.getElementById("profile-phone").value = (entry && entry.phone) || "";
-  document.getElementById("profile-birthday").value = myProfile ? myProfile.birthday : "";
+  const birthMonth = document.getElementById("profile-birth-month");
+  const birthday = myProfile ? birthdayMonthDay(myProfile.birthday) : "";
+  birthMonth.replaceChildren(optionOf("", "Month"), ...MONTH_NAMES.map((name, index) => optionOf(String(index + 1).padStart(2, "0"), name)));
+  birthMonth.value = birthday ? birthday.slice(0, 2) : "";
+  fillBirthDays(birthday ? birthday.slice(3) : "");
+  birthMonth.onchange = () => fillBirthDays(document.getElementById("profile-birth-day").value);
+  document.getElementById("profile-first-name").value = me.name;
+  document.getElementById("profile-last-name").value = myLastName();
+  document.getElementById("profile-phone").value = phoneOf(me.email);
   document.getElementById("profile-dietary").value = myProfile ? myProfile.dietary : "";
   document.getElementById("profile-color").value = myProfile ? myProfile.color : "";
   document.getElementById("profile-dessert").value = myProfile ? myProfile.dessert : "";
@@ -1506,29 +1724,45 @@ function startOnboarding() {
   onboarding = true;
   document.getElementById("page-nav").hidden = true;
   document.getElementById("profile-heading").textContent = `Welcome, ${me.name}`;
-  document.getElementById("profile-intro").textContent = "Before you start, please fill in your profile. You can change any of it later under My Profile.";
+  document.getElementById("profile-intro").textContent = myProfile
+    ? "We've added a couple of questions to your profile. Please finish it to continue."
+    : "Before you start, please fill in your profile. You can change any of it later under My Profile in the menu at the top right.";
   document.getElementById("save-profile").textContent = "Save and continue";
   showPage("profile");
 }
 
 async function saveProfileForm() {
   const value = (id) => document.getElementById(id).value.trim();
+  const lastName = value("profile-last-name");
   const phone = value("profile-phone");
-  const birthday = value("profile-birthday");
+  const birthMonth = value("profile-birth-month");
+  const birthDay = value("profile-birth-day");
   const month = value("profile-grad-month");
   const dietary = value("profile-dietary");
   const color = value("profile-color");
   const dessert = value("profile-dessert");
+  if (!lastName) throw new Error("Please enter your last name.");
   if (!/^[0-9+()\-.\s]{7,30}$/.test(phone)) throw new Error("Please enter your phone number.");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthday) || birthday >= dateToIso(startOfDay(new Date()))) throw new Error("Please enter your date of birth.");
+  if (!/^\d{2}$/.test(birthMonth) || !/^\d{2}$/.test(birthDay) || Number(birthDay) > daysInMonth(Number(birthMonth))) {
+    throw new Error("Please choose your birthday's month and day.");
+  }
   if (!dietary) throw new Error('Please enter any dietary restrictions or allergies, or "None".');
   if (!color) throw new Error("Please enter your favorite color.");
   if (!dessert) throw new Error("Please enter your favorite kind of dessert.");
   const graduation = month === "n/a" ? "n/a" : `${value("profile-grad-year")}-${month}`;
-  await Store.saveProfile(me.email, { birthday, graduation, color, dessert, dietary, updatedAt: new Date().toISOString() });
-  // A directory entry the lab managers already made only needs the phone number; otherwise it's made here.
-  const entry = directory.find((item) => item.email === me.email);
-  await Store.saveDirectory(me.email, entry ? { phone } : { name: me.name, title: titleOf(me), phone });
+  await Store.saveProfile(me.email, { birthday: `${birthMonth}-${birthDay}`, graduation, color, dessert, dietary, updatedAt: new Date().toISOString() });
+  // A directory entry the lab managers already made only needs the last name and phone number; otherwise it's made
+  // here. A PI's phone number goes where RAs can't see it.
+  const entry = myDirectoryEntry();
+  const isPi = titleOf(me) === "PI";
+  const own = isPi ? { lastName } : { lastName, phone };
+  await Store.saveDirectory(me.email, entry ? own : { name: me.name, title: titleOf(me), ...own });
+  if (isPi) {
+    await Store.savePrivatePhone(me.email, phone);
+    if (entry && entry.phone) await Store.clearDirectoryPhone(me.email);
+  } else if (privatePhones.some((item) => item.email === me.email)) {
+    await Store.deletePrivatePhone(me.email);
+  }
   const first = onboarding;
   await refresh();
   if (first) {
@@ -1543,26 +1777,29 @@ async function saveProfileForm() {
   setProfileStatus("Saved your profile.");
 }
 
-function tableOf(headings, rows) {
-  const wrapper = el("div", "table-scroll");
-  const table = el("table", "data-table");
-  const head = el("tr");
-  head.append(...headings.map((heading) => el("th", "", heading)));
-  const thead = el("thead");
-  thead.append(head);
-  const tbody = el("tbody");
-  for (const cells of rows) {
-    const row = el("tr");
-    row.append(...cells.map((cell) => {
-      const td = el("td");
-      td.append(cell);
-      return td;
-    }));
-    tbody.append(row);
-  }
-  table.append(thead, tbody);
-  wrapper.append(table);
-  return wrapper;
+// --- The lab directory ---
+
+const DIRECTORY_TABS = [
+  { key: "all", label: "Whole lab", titles: null },
+  { key: "ra", label: "RAs", titles: ["RA"] },
+  { key: "phd", label: "PhD Students", titles: ["PhD Student"] },
+  { key: "postdoc", label: "Post-Docs", titles: ["Post-Doc"] },
+  { key: "staff", label: "Staff", titles: ["Lab Manager"] },
+  { key: "pi", label: "PI", titles: ["PI"] },
+];
+// Most senior first, for sorting by role.
+const TITLE_ORDER = ["PI", "Lab Manager", "Post-Doc", "PhD Student", "RA"];
+const TITLE_CLASSES = { RA: "ra", "PhD Student": "phd", "Post-Doc": "postdoc", "Lab Manager": "manager", PI: "pi" };
+
+function titleBadge(title) {
+  return el("span", `title-badge title-${TITLE_CLASSES[title] || "ra"}`, title);
+}
+
+function personCell(person) {
+  const cell = el("div", "person-cell");
+  const initials = `${person.name[0] || ""}${(person.lastName || "")[0] || ""}`.toUpperCase();
+  cell.append(el("span", `name-avatar title-${TITLE_CLASSES[person.title] || "ra"}`, initials || "?"), el("span", "person-cell-name", person.fullName));
+  return cell;
 }
 
 function linkTo(href, text) {
@@ -1571,30 +1808,323 @@ function linkTo(href, text) {
   return link;
 }
 
+// A favorite color that's a real color name (or code) gets a little swatch.
+function colorCell(color) {
+  const cell = el("span", "color-cell");
+  const css = color.replace(/\s+/g, "").toLowerCase();
+  if (typeof CSS !== "undefined" && CSS.supports && CSS.supports("color", css)) {
+    const swatch = el("span", "color-swatch");
+    swatch.style.background = css;
+    cell.append(swatch);
+  }
+  cell.append(color);
+  return cell;
+}
+
+// A table whose columns sort when their heading is clicked. Each column has a key, a label, a value to sort by
+// and a way to show it.
+function sortableTable(columns, rows, sort, onSort) {
+  const column = columns.find((item) => item.key === sort.key) || columns[0];
+  const sorted = [...rows].sort((a, b) => {
+    const x = column.sortValue(a);
+    const y = column.sortValue(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * sort.dir || a.fullName.localeCompare(b.fullName);
+  });
+  const wrapper = el("div", "table-scroll");
+  const table = el("table", "data-table");
+  const head = el("tr");
+  for (const item of columns) {
+    const th = el("th");
+    const active = item.key === column.key;
+    th.setAttribute("aria-sort", active ? (sort.dir === 1 ? "ascending" : "descending") : "none");
+    const button = el("button", `sort-button${active ? " active" : ""}`);
+    button.type = "button";
+    button.append(item.label, el("span", "sort-arrow", active ? (sort.dir === 1 ? "▲" : "▼") : "↕"));
+    button.addEventListener("click", () => onSort({ key: item.key, dir: active ? -sort.dir : 1 }));
+    th.append(button);
+    head.append(th);
+  }
+  const thead = el("thead");
+  thead.append(head);
+  const tbody = el("tbody");
+  for (const row of sorted) {
+    const tr = el("tr");
+    for (const item of columns) {
+      const td = el("td");
+      td.append(item.render(row));
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrapper.append(table);
+  return wrapper;
+}
+
+const byLastName = (row) => `${row.lastName || row.name} ${row.name}`.toLowerCase();
+const byTitle = (row) => TITLE_ORDER.indexOf(row.title);
+
 function renderDirectory() {
   if (!me) return;
-  const people = [...directory].sort((a, b) => a.name.localeCompare(b.name));
-  document.getElementById("directory-list").replaceChildren(people.length
-    ? tableOf(["Name", "Role", "Email", "Phone"], people.map((person) => [
-      person.name,
-      person.title,
-      linkTo(`mailto:${person.email}`, person.email),
-      person.phone ? linkTo(`tel:${person.phone.replace(/[^0-9+]/g, "")}`, person.phone) : "Not added yet",
-    ]))
-    : el("p", "muted", "No one is in the directory yet."));
+  const viewerIsRa = !isReviewer() && !isGrad();
+  const people = directory.map((entry) => ({
+    ...entry,
+    fullName: entry.lastName ? `${entry.name} ${entry.lastName}` : entry.name,
+    phone: phoneOf(entry.email),
+  }));
+  const tab = DIRECTORY_TABS.find((item) => item.key === directoryTab) || DIRECTORY_TABS[0];
+  const inTab = (person) => !tab.titles || tab.titles.includes(person.title);
+
+  document.getElementById("directory-counts").replaceChildren(...TITLE_ORDER
+    .map((title) => [title, people.filter((person) => person.title === title).length])
+    .filter(([, count]) => count)
+    .map(([title, count]) => {
+      const chip = el("span", `count-chip title-${TITLE_CLASSES[title]}`);
+      chip.append(el("strong", "", String(count)), ` ${title}${count === 1 ? "" : title.endsWith("s") ? "" : "s"}`);
+      return chip;
+    }));
+
+  document.getElementById("directory-tabs").replaceChildren(...DIRECTORY_TABS.map((item) => {
+    const button = el("button", "pill-tab");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(item.key === tab.key));
+    const count = people.filter((person) => !item.titles || item.titles.includes(person.title)).length;
+    button.append(item.label, el("span", "pill-count", String(count)));
+    button.addEventListener("click", () => {
+      directoryTab = item.key;
+      renderDirectory();
+    });
+    return button;
+  }));
+
+  const shown = people.filter(inTab);
+  document.getElementById("directory-list").replaceChildren(shown.length
+    ? sortableTable([
+      { key: "name", label: "Name", sortValue: byLastName, render: personCell },
+      { key: "title", label: "Role", sortValue: byTitle, render: (row) => titleBadge(row.title) },
+      { key: "email", label: "Email", sortValue: (row) => row.email, render: (row) => linkTo(`mailto:${row.email}`, row.email) },
+      { key: "phone", label: "Phone", sortValue: (row) => row.phone || "~", render: (row) => {
+        if (row.phone) return linkTo(`tel:${row.phone.replace(/[^0-9+]/g, "")}`, row.phone);
+        return el("span", "muted", viewerIsRa && row.title === "PI" ? "Not shown to RAs" : "Not added yet");
+      } },
+    ], shown, directorySort, (sort) => {
+      directorySort = sort;
+      renderDirectory();
+    })
+    : el("p", "muted empty-note", "No one in this group yet."));
+
   const details = document.getElementById("manager-details");
   details.hidden = !isReviewer();
   if (!isReviewer()) return;
-  const rows = [...members].sort((a, b) => a.name.localeCompare(b.name)).map((member) => {
+  const rows = members.map((member) => {
+    const entry = directory.find((item) => item.email === member.email) || {};
     const profile = profiles.find((item) => item.email === member.email);
-    if (!profile) return [member.name, "Hasn't filled in their profile yet", "", "", "", ""];
-    return [member.name, formatIso(profile.birthday), formatGraduation(profile.graduation), profile.color, profile.dessert, profile.dietary];
-  });
-  document.getElementById("manager-details-list").replaceChildren(
-    tableOf(["Name", "Birthday", "Expected graduation", "Favorite color", "Favorite dessert", "Dietary restrictions/allergies"], rows));
+    return {
+      name: member.name,
+      lastName: entry.lastName || "",
+      fullName: entry.lastName ? `${member.name} ${entry.lastName}` : member.name,
+      title: titleOf(member),
+      profile,
+    };
+  }).filter(inTab);
+  const missing = (row, text) => (row.profile ? text(row.profile) : el("span", "muted", "Not filled in yet"));
+  document.getElementById("manager-details-list").replaceChildren(rows.length
+    ? sortableTable([
+      { key: "name", label: "Name", sortValue: byLastName, render: personCell },
+      { key: "title", label: "Role", sortValue: byTitle, render: (row) => titleBadge(row.title) },
+      { key: "birthday", label: "Birthday", sortValue: (row) => (row.profile ? birthdayMonthDay(row.profile.birthday) : "~"), render: (row) => missing(row, (profile) => formatBirthday(profile.birthday)) },
+      { key: "graduation", label: "Expected graduation", sortValue: (row) => (row.profile && row.profile.graduation !== "n/a" ? row.profile.graduation : "~"), render: (row) => missing(row, (profile) => formatGraduation(profile.graduation)) },
+      { key: "color", label: "Favorite color", sortValue: (row) => (row.profile ? row.profile.color.toLowerCase() : "~"), render: (row) => missing(row, (profile) => colorCell(profile.color)) },
+      { key: "dessert", label: "Favorite dessert", sortValue: (row) => (row.profile ? row.profile.dessert.toLowerCase() : "~"), render: (row) => missing(row, (profile) => profile.dessert) },
+      { key: "dietary", label: "Dietary restrictions/allergies", sortValue: (row) => (row.profile ? row.profile.dietary.toLowerCase() : "~"), render: (row) => missing(row, (profile) => profile.dietary) },
+    ], rows, detailsSort, (sort) => {
+      detailsSort = sort;
+      renderDirectory();
+    })
+    : el("p", "muted empty-note", "No one in this group yet."));
 }
 
-// --- Who's available ---
+// --- Website management ---
+// Lab managers keep the USC academic calendar and staff holidays up to date here. Each list is a table of rows to
+// edit, add to or remove from; saving checks every row and stores the whole list.
+
+function setWebsiteStatus(text, isError) {
+  const status = document.getElementById("website-status");
+  status.textContent = text;
+  status.classList.toggle("error", Boolean(isError));
+}
+
+// A table of editable rows. Columns are { key, label, type: "text" | "date" | "select", options }.
+function rowsEditor(columns, rows, addLabel) {
+  const wrapper = el("div", "rows-editor");
+  const scroll = el("div", "table-scroll editor-scroll");
+  const table = el("table", "data-table editor-table");
+  const head = el("tr");
+  head.append(...columns.map((column) => el("th", "editor-th", column.label)), el("th", "editor-th", ""));
+  const thead = el("thead");
+  thead.append(head);
+  const tbody = el("tbody");
+  const entries = [];
+  const addRow = (row) => {
+    const tr = el("tr");
+    const inputs = {};
+    for (const column of columns) {
+      const input = el(column.type === "select" ? "select" : "input");
+      if (column.type === "select") {
+        for (const [value, text] of column.options) {
+          const option = el("option", "", text);
+          option.value = value;
+          input.append(option);
+        }
+      } else {
+        input.type = column.type;
+      }
+      input.value = row[column.key] || "";
+      input.setAttribute("aria-label", column.label);
+      inputs[column.key] = input;
+      const td = el("td");
+      td.append(input);
+      tr.append(td);
+    }
+    const entry = { tr, inputs, original: row };
+    const remove = el("button", "link-button danger-link", "Remove");
+    remove.type = "button";
+    remove.addEventListener("click", () => {
+      entries.splice(entries.indexOf(entry), 1);
+      tbody.replaceChildren(...entries.map((item) => item.tr));
+    });
+    const td = el("td");
+    td.append(remove);
+    tr.append(td);
+    entries.push(entry);
+    tbody.append(tr);
+  };
+  rows.forEach(addRow);
+  table.append(thead, tbody);
+  scroll.append(table);
+  const add = el("button", "link-button", addLabel);
+  add.type = "button";
+  add.addEventListener("click", () => addRow({}));
+  wrapper.append(scroll, add);
+  return {
+    node: wrapper,
+    // Rows left completely empty are ignored.
+    read: () => entries
+      .map((entry) => ({ original: entry.original, values: Object.fromEntries(Object.entries(entry.inputs).map(([key, input]) => [key, input.value.trim()])) }))
+      .filter(({ values }) => Object.values(values).some(Boolean)),
+  };
+}
+
+const EVENT_KINDS = [["holiday", "Holiday"], ["break", "Break"], ["academic", "Academic date"]];
+let websiteEditors = null;
+
+function coverageLine(label, through, saved) {
+  const line = el("div", "coverage-line");
+  line.append(el("strong", "", label), ` goes through ${through}.`);
+  line.append(el("span", "muted", saved ? ` Last saved by ${nameFor(saved.updatedBy)} on ${formatIso(String(saved.updatedAt).slice(0, 10))}.` : " Using the dates published with the site."));
+  return line;
+}
+
+function renderWebsiteManagement() {
+  if (!isReviewer()) return;
+  const lastSemester = [...semesters].sort((a, b) => a.classesBegin.localeCompare(b.classesBegin)).pop();
+  const lastHoliday = [...staffHolidays].sort((a, b) => a.to.localeCompare(b.to)).pop();
+  document.getElementById("website-coverage").replaceChildren(
+    coverageLine("The academic calendar", lastSemester ? `${lastSemester.name} (classes end ${formatIso(lastSemester.classesEnd)})` : "no semesters yet", calendarSettings.academic),
+    coverageLine("Staff holidays", lastHoliday ? formatIso(lastHoliday.to) : "no dates yet", calendarSettings.holidays),
+  );
+  websiteEditors = {
+    semesters: rowsEditor([
+      { key: "name", label: "Semester", type: "text" },
+      { key: "classesBegin", label: "Classes begin", type: "date" },
+      { key: "classesEnd", label: "Classes end", type: "date" },
+      { key: "finalsBegin", label: "Finals begin", type: "date" },
+      { key: "finalsEnd", label: "Finals end", type: "date" },
+    ], [...semesters].sort((a, b) => a.classesBegin.localeCompare(b.classesBegin)), "Add a semester"),
+    events: rowsEditor([
+      { key: "name", label: "Name", type: "text" },
+      { key: "kind", label: "Kind", type: "select", options: EVENT_KINDS },
+      { key: "from", label: "From", type: "date" },
+      { key: "to", label: "To", type: "date" },
+    ], [...events].sort((a, b) => a.from.localeCompare(b.from)), "Add a date"),
+    holidays: rowsEditor([
+      { key: "name", label: "Holiday", type: "text" },
+      { key: "from", label: "From", type: "date" },
+      { key: "to", label: "To", type: "date" },
+    ], [...staffHolidays].sort((a, b) => a.from.localeCompare(b.from)), "Add a staff holiday"),
+  };
+  document.getElementById("semesters-editor").replaceChildren(websiteEditors.semesters.node);
+  document.getElementById("events-editor").replaceChildren(websiteEditors.events.node);
+  document.getElementById("holidays-editor").replaceChildren(websiteEditors.holidays.node);
+  setWebsiteStatus("");
+}
+
+const isDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+// A new semester's id comes from its name, such as "spring-2030"; saved ones keep theirs, since class times use it.
+function semesterId(name, taken) {
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "semester";
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  taken.add(id);
+  return id;
+}
+
+function readSemesters() {
+  const taken = new Set();
+  const rows = websiteEditors.semesters.read();
+  for (const { original } of rows) if (original.id) taken.add(original.id);
+  return rows.map(({ original, values }, index) => {
+    const where = `Semester ${index + 1}${values.name ? ` (${values.name})` : ""}`;
+    if (!values.name) throw new Error(`${where} needs a name.`);
+    if (!isDate(values.classesBegin) || !isDate(values.classesEnd) || values.classesEnd < values.classesBegin) {
+      throw new Error(`${where} needs a first and last day of classes, in order.`);
+    }
+    if (Boolean(values.finalsBegin) !== Boolean(values.finalsEnd) || (values.finalsBegin && (values.finalsEnd < values.finalsBegin || values.finalsBegin < values.classesEnd))) {
+      throw new Error(`${where}: give both finals dates, in order and after classes end, or neither.`);
+    }
+    return {
+      id: original.id || semesterId(values.name, taken),
+      name: values.name,
+      classesBegin: values.classesBegin,
+      classesEnd: values.classesEnd,
+      ...(values.finalsBegin ? { finalsBegin: values.finalsBegin, finalsEnd: values.finalsEnd } : {}),
+    };
+  }).sort((a, b) => a.classesBegin.localeCompare(b.classesBegin));
+}
+
+function readDated(editor, label, withKind) {
+  return editor.read().map(({ values }, index) => {
+    const where = `${label} ${index + 1}${values.name ? ` (${values.name})` : ""}`;
+    if (!values.name) throw new Error(`${where} needs a name.`);
+    if (!isDate(values.from) || !isDate(values.to) || values.to < values.from) throw new Error(`${where} needs a start and end date, in order.`);
+    return { name: values.name, ...(withKind ? { kind: values.kind || "holiday" } : {}), from: values.from, to: values.to };
+  }).sort((a, b) => a.from.localeCompare(b.from));
+}
+
+async function saveWebsiteData(which) {
+  const button = document.getElementById(which === "academic" ? "save-academic" : "save-holidays");
+  button.disabled = true;
+  try {
+    const signed = { updatedBy: me.email, updatedAt: new Date().toISOString() };
+    if (which === "academic") {
+      const saved = { semesters: readSemesters(), events: readDated(websiteEditors.events, "Date", true), source: "https://usc.edu/academic-calendar/", ...signed };
+      await Store.saveSetting("academicCalendar", saved);
+    } else {
+      await Store.saveSetting("staffHolidays", { holidays: readDated(websiteEditors.holidays, "Staff holiday", false), ...signed });
+    }
+    await refresh();
+    renderWebsiteManagement();
+    setWebsiteStatus(which === "academic" ? "Saved the academic calendar." : "Saved the staff holidays.");
+  } catch (error) {
+    setWebsiteStatus(friendlyError(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// --- Availability Checker ---
 // Lets lab managers check anyone's availability at any time, by role, and test times as a visit.
 
 const CHECK_ROLES = [
@@ -1797,10 +2327,20 @@ function setCalendarView(view) {
     button.setAttribute("aria-pressed", String(button.dataset.view === view));
   }
   const lab = isLabView();
-  document.getElementById("calendar-scope").textContent = lab
-    ? "Participant visit staffing"
-    : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
-  document.getElementById("calendar-hint").textContent = lab
+  const available = isAvailabilityView();
+  const checker = isCheckerView();
+  // The Availability Checker replaces the week with its own form.
+  document.getElementById("calendar-body").hidden = checker;
+  document.getElementById("availability-checker").hidden = !checker;
+  document.getElementById("calendar-scope").textContent = checker
+    ? "Availability Checker"
+    : lab ? "Participant visit staffing"
+      : available ? "When lab members are available" : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
+  document.getElementById("calendar-hint").textContent = checker
+    ? "See who could work at any time, not only during visits. Pick a day and times, or test them as a visit to see whether it could be staffed."
+    : available
+    ? "Each block is a time someone has nothing on their schedule, between 8 AM and 6 PM. Filter by role, or turn people on and off below it. Click a block to see what they're trained in."
+    : lab
     ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
     : "Each block is a time someone can't be in the lab. Open time is when they're available. Click your own blocks to change them, or drag on empty space to add a time.";
   setCalendarStatus("");
@@ -1987,6 +2527,47 @@ function renderSemesterOptions() {
   }));
   if (current) semesterEl.value = current;
   if (semesterEl.value && !classFromEl.value) applySemesterDates();
+  renderNoClasses();
+}
+
+function noClassesIn(email) {
+  return (noClasses.find((item) => item.email === email) || { semesters: [] }).semesters;
+}
+
+// Someone with no classes in a semester says so here, and isn't reminded to add a class schedule for it.
+// A reviewer entering times for someone can say it for them.
+function renderNoClasses() {
+  const box = document.getElementById("no-classes");
+  const semester = selectedSemester();
+  if (!me || !semester) {
+    box.replaceChildren();
+    return;
+  }
+  const owner = targetEmail();
+  const marked = noClassesIn(owner).includes(semester.id);
+  const whose = enteringForOther() ? `${nameFor(owner)} has` : "You have";
+  const button = el("button", marked ? "link-button" : "secondary small", marked ? "Undo" : `I have no classes in ${semester.name}`);
+  button.type = "button";
+  if (enteringForOther() && !marked) button.textContent = `${nameFor(owner)} has no classes in ${semester.name}`;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const current = noClassesIn(owner);
+      const next = marked ? current.filter((id) => id !== semester.id) : [...current, semester.id];
+      await Store.saveNoClasses(owner, next);
+      noClasses = [...noClasses.filter((item) => item.email !== owner), { email: owner, semesters: next }];
+      renderNoClasses();
+      setStatus(marked ? `Undone. Add the ${semester.name} class schedule above when you have it.` : `Saved: no classes in ${semester.name}, so no more reminders for it.`);
+    } catch (error) {
+      setStatus(friendlyError(error), true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  box.classList.toggle("marked", marked);
+  box.replaceChildren(...(marked
+    ? [el("span", "", `${whose} no classes in ${semester.name}, so there won't be any reminders for it.`), button]
+    : [el("span", "muted", `Not taking classes in ${semester.name}?`), button]));
 }
 
 function isScheduleChange() {
@@ -2391,58 +2972,120 @@ function reviewNoteInput(value) {
   return input;
 }
 
-function renderReviewList() {
-  const listEl = document.getElementById("review-list");
-  const tab = document.querySelector('.manage-tab[data-manage="review"]');
-  if (!isReviewer()) return;
-  const order = { pending: 0, approved: 1, declined: 2 };
-  const pendingChanges = changeRequests.filter((request) => request.status === "pending");
-  const sorted = [...timeOff].sort((a, b) => order[a.status] - order[b.status] || a.from.localeCompare(b.from));
-  const pendingCount = timeOff.filter((request) => request.status === "pending").length + pendingChanges.length;
-  tab.textContent = pendingCount ? `Review requests (${pendingCount})` : "Review requests";
-  document.getElementById("manage-link").textContent = pendingCount ? `Lab Management (${pendingCount})` : "Lab Management";
+const REVIEW_FILTERS = [["pending", "Pending"], ["approved", "Approved"], ["declined", "Declined"]];
 
-  const changeRows = pendingChanges.map((request) => {
-    const noteInput = reviewNoteInput("");
-    const row = entryRow(
-      `Schedule change: ${request.summary}`,
-      noteInput,
-      actionButton("Approve", async () => {
-        await Store.approveChangeRequest(request.id, checkedPlan(request), decision("approved", noteInput.value.trim()));
-        await refresh();
-        setStatus(`Approved ${nameFor(request.ownerEmail)}'s change.`);
-      }),
-      actionButton("Decline", async () => {
-        await Store.decideChangeRequest(request.id, decision("declined", noteInput.value.trim()));
-        await refresh();
-        setStatus(`Declined ${nameFor(request.ownerEmail)}'s change.`);
-      }),
-    );
-    row.firstChild.append(el("div", "status-badge status-pending", STATUS_LABELS.pending));
-    row.firstChild.prepend(personHeader(personFor(request.ownerEmail)));
-    row.classList.add("request-row");
-    return row;
+function pendingRequestCount() {
+  return timeOff.filter((request) => request.status === "pending").length
+    + changeRequests.filter((request) => request.status === "pending").length;
+}
+
+// The red badges on Lab Management and Review requests, hidden when nothing is waiting. They use the live count from
+// the database once it's known, so a request someone just sent shows without reloading.
+function updateReviewBadges() {
+  const count = livePending === null ? pendingRequestCount() : livePending;
+  for (const id of ["manage-badge", "review-badge", "manage-menu-badge"]) {
+    const badge = document.getElementById(id);
+    badge.hidden = !isReviewer() || count === 0;
+    badge.textContent = count > 99 ? "99+" : String(count);
+  }
+  document.getElementById("manage-button").setAttribute("aria-label", count ? `Lab Management, ${count} request${count === 1 ? "" : "s"} to review` : "Lab Management");
+}
+
+// Reviewers watch for requests coming in. When the count changes, the lists reload too.
+function watchPendingRequests() {
+  if (stopWatchingPending) stopWatchingPending();
+  stopWatchingPending = null;
+  livePending = null;
+  if (!isReviewer() || !Store.watchPending) return;
+  stopWatchingPending = Store.watchPending((count) => {
+    livePending = count;
+    updateReviewBadges();
+    if (count !== pendingRequestCount()) {
+      clearTimeout(pendingRefreshTimer);
+      pendingRefreshTimer = setTimeout(() => refresh().catch(() => {}), 1000);
+    }
   });
+}
 
-  const timeOffRows = sorted.map((request) => {
-    const noteInput = reviewNoteInput(request.reviewNote);
-    const decide = (status, text) => actionButton(text, async () => {
-      await Store.decideTimeOff(request.id, decision(status, noteInput.value.trim()));
+// Who decided a request, and when. Time off a Grad Student/Post-Doc saved themself didn't need review.
+function decidedLine(request) {
+  const who = nameFor(request.reviewedBy);
+  const text = request.reviewedBy === request.ownerEmail
+    ? `Saved by ${who}, no review needed`
+    : `${STATUS_LABELS[request.status]} by ${who}`;
+  const line = el("div", `decided-by decided-${request.status}`, `${text}${request.reviewedAt ? ` on ${formatIso(String(request.reviewedAt).slice(0, 10))}` : ""}`);
+  if (request.reviewNote) line.append(el("span", "decided-note", ` · Note: ${request.reviewNote}`));
+  return line;
+}
+
+function requestRow(text, request, buttons) {
+  const row = entryRow(text, ...buttons);
+  row.firstChild.append(el("div", `status-badge status-${request.status}`, STATUS_LABELS[request.status]));
+  if (request.status !== "pending") row.firstChild.append(decidedLine(request));
+  row.firstChild.prepend(personHeader(personFor(request.ownerEmail)));
+  row.classList.add("request-row");
+  return row;
+}
+
+function changeRequestRow(request) {
+  if (request.status !== "pending") return requestRow(`Schedule change: ${request.summary}`, request, []);
+  const noteInput = reviewNoteInput("");
+  return requestRow(`Schedule change: ${request.summary}`, request, [
+    noteInput,
+    actionButton("Approve", async () => {
+      await Store.approveChangeRequest(request.id, checkedPlan(request), decision("approved", noteInput.value.trim()));
       await refresh();
-      setStatus(`${status === "approved" ? "Approved" : "Declined"} ${nameFor(request.ownerEmail)}'s request.`);
-    });
-    const buttons = [];
-    if (request.status !== "approved") buttons.push(decide("approved", "Approve"));
-    if (request.status !== "declined") buttons.push(decide("declined", "Decline"));
-    const row = entryRow(`Time off: ${describeTimeOff(request)}`, noteInput, ...buttons);
-    row.firstChild.append(el("div", `status-badge status-${request.status}`, STATUS_LABELS[request.status]));
-    row.firstChild.prepend(personHeader(personFor(request.ownerEmail)));
-    row.classList.add("request-row");
-    return row;
-  });
+      setStatus(`Approved ${nameFor(request.ownerEmail)}'s change.`);
+    }),
+    actionButton("Decline", async () => {
+      await Store.decideChangeRequest(request.id, decision("declined", noteInput.value.trim()));
+      await refresh();
+      setStatus(`Declined ${nameFor(request.ownerEmail)}'s change.`);
+    }),
+  ]);
+}
 
-  const rows = [...changeRows, ...timeOffRows];
-  listEl.replaceChildren(...(rows.length ? rows : [el("p", "muted", "No requests yet.")]));
+// Time off can be changed after it's decided, from approved to declined or back.
+function timeOffRow(request) {
+  const noteInput = reviewNoteInput(request.reviewNote);
+  const decide = (status, text) => actionButton(text, async () => {
+    await Store.decideTimeOff(request.id, decision(status, noteInput.value.trim()));
+    await refresh();
+    setStatus(`${status === "approved" ? "Approved" : "Declined"} ${nameFor(request.ownerEmail)}'s request.`);
+  });
+  const buttons = [noteInput];
+  if (request.status !== "approved") buttons.push(decide("approved", "Approve"));
+  if (request.status !== "declined") buttons.push(decide("declined", "Decline"));
+  return requestRow(`Time off: ${describeTimeOff(request)}`, request, buttons);
+}
+
+function renderReviewList() {
+  updateReviewBadges();
+  if (!isReviewer()) return;
+  const items = [
+    ...changeRequests.map((request) => ({ request, row: changeRequestRow, when: String(request.createdAt || "").slice(0, 10) })),
+    ...timeOff.map((request) => ({ request, row: timeOffRow, when: request.from })),
+  ];
+  document.getElementById("review-filter").replaceChildren(...REVIEW_FILTERS.map(([key, label]) => {
+    const button = el("button", "pill-tab");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(key === reviewFilter));
+    button.append(label, el("span", "pill-count", String(items.filter((item) => item.request.status === key).length)));
+    button.addEventListener("click", () => {
+      reviewFilter = key;
+      renderReviewList();
+    });
+    return button;
+  }));
+  // Waiting requests come soonest first; decided ones most recently decided first.
+  const shown = items.filter((item) => item.request.status === reviewFilter).sort((a, b) => (reviewFilter === "pending"
+    ? a.when.localeCompare(b.when)
+    : String(b.request.reviewedAt || "").localeCompare(String(a.request.reviewedAt || "")) || a.when.localeCompare(b.when)));
+  const empty = { pending: "Nothing is waiting for review.", approved: "No approved requests yet.", declined: "No declined requests yet." };
+  document.getElementById("review-list").replaceChildren(...(shown.length
+    ? shown.map((item) => item.row(item.request))
+    : [el("p", "muted empty-note", empty[reviewFilter])]));
 }
 
 // With trackChanges, saved training is shown filled and anything changed since is marked unsaved,
@@ -2626,8 +3269,9 @@ function memberRow(member) {
   return row;
 }
 
-function otherMembers() {
-  return members.filter((member) => member.email !== me.email).sort((a, b) => a.name.localeCompare(b.name));
+// Everyone on the lab list, including you, so your own training is changed the same way as anyone else's.
+function labMembers() {
+  return [...members].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function setShownMembers(emails) {
@@ -2696,6 +3340,41 @@ function renderShownMembers(others) {
 }
 
 // Clicking anywhere outside the open drop-down, or pressing Escape, closes it.
+// The drop-down menus in the top bar, as [wrapper, button, menu] ids.
+const NAV_MENUS = [["schedules-wrap", "schedules-button", "schedules-menu"], ["manage-link", "manage-button", "manage-menu"]];
+
+function setNavMenu(buttonId, menuId, open) {
+  document.getElementById(menuId).hidden = !open;
+  document.getElementById(buttonId).setAttribute("aria-expanded", String(open));
+}
+
+// Clicking outside an open menu, or pressing Escape, closes it.
+function closeNavMenus(event) {
+  for (const [wrapId, buttonId, menuId] of NAV_MENUS) {
+    if (document.getElementById(menuId).hidden) continue;
+    if (event.type === "keydown" ? event.key !== "Escape" : document.getElementById(wrapId).contains(event.target)) continue;
+    setNavMenu(buttonId, menuId, false);
+  }
+}
+
+function setProfileMenu(open) {
+  document.getElementById("profile-menu").hidden = !open;
+  document.getElementById("profile-button").setAttribute("aria-expanded", String(open));
+}
+
+// Clicking outside the profile menu, or pressing Escape, closes it.
+function closeProfileMenu(event) {
+  if (document.getElementById("profile-menu").hidden) return;
+  if (event.type === "keydown" ? event.key !== "Escape" : document.getElementById("user-bar").contains(event.target)) return;
+  setProfileMenu(false);
+}
+
+function closePopups(event) {
+  closeMemberPicker(event);
+  closeProfileMenu(event);
+  closeNavMenus(event);
+}
+
 function closeMemberPicker(event) {
   const details = document.getElementById("member-picker").firstChild;
   if (!details || !details.open) return;
@@ -2706,18 +3385,18 @@ function closeMemberPicker(event) {
 
 function renderMemberList() {
   if (!isReviewer()) return;
-  const others = otherMembers();
+  const others = labMembers();
   shownMembers = new Set([...shownMembers].filter((email) => others.some((member) => member.email === email)));
   const picker = document.getElementById("member-picker");
   if (!others.length) {
     picker.replaceChildren();
-    document.getElementById("member-list").replaceChildren(el("p", "muted", "No one else has been added yet. Add people below."));
+    document.getElementById("member-list").replaceChildren(el("p", "muted", "No one has been added yet. Add people below."));
   } else {
     picker.replaceChildren(renderMemberPicker(others));
     renderShownMembers(others);
   }
   const self = members.find((member) => member.email === me.email);
-  document.getElementById("my-info").replaceChildren(...(self ? [memberRow(self), emailSettings(self)] : []));
+  document.getElementById("my-info").replaceChildren(...(self ? [emailSettings(self)] : []));
 }
 
 let newMemberSkills = null;
@@ -2853,7 +3532,7 @@ function buildBlocks() {
 // Only reviewers ask for everyone's entries. For anyone else the database refuses that request.
 async function refresh() {
   const scope = isReviewer() ? undefined : me.email;
-  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments, loadedStaffing, contacts, profile, loadedDirectory, loadedProfiles] = await Promise.all([
+  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments, loadedStaffing, contacts, profile, loadedDirectory, loadedProfiles, loadedPrivate, loadedSettings, loadedNoClasses] = await Promise.all([
     isReviewer() ? Store.listMembers() : [me],
     Store.listAvailability(scope),
     Store.listTimeOff(scope),
@@ -2864,7 +3543,19 @@ async function refresh() {
     Store.getProfile(me.email),
     Store.listDirectory(),
     isReviewer() ? Store.listProfiles() : [],
+    // RAs can't see a PI's phone number, so they don't ask for it.
+    isReviewer() || isGrad() ? Store.listPrivatePhones() : [],
+    Store.getSettings(),
+    Store.listNoClasses(isReviewer() ? undefined : me.email),
   ]);
+  noClasses = loadedNoClasses;
+  // Calendars saved under Website management replace the ones published with the site.
+  calendarSettings = loadedSettings;
+  if (loadedSettings.academic) {
+    semesters = loadedSettings.academic.semesters;
+    events = loadedSettings.academic.events;
+  }
+  if (loadedSettings.holidays) staffHolidays = loadedSettings.holidays.holidays;
   members = people.map((member, index) => ({ ...member, skills: normalizeSkills(member.skills), color: COLORS[index % COLORS.length] }));
   availability = loadedAvailability;
   timeOff = loadedTimeOff;
@@ -2875,7 +3566,15 @@ async function refresh() {
   myProfile = profile;
   directory = loadedDirectory;
   profiles = loadedProfiles;
-  if (isReviewer() && await syncDirectory()) directory = await Store.listDirectory();
+  privatePhones = loadedPrivate;
+  if (isReviewer() && await syncDirectory()) {
+    [directory, privatePhones] = await Promise.all([Store.listDirectory(), Store.listPrivatePhones()]);
+  }
+  // Birthdays used to be saved with the year. Each person's is trimmed to the month and day when they next sign in.
+  if (myProfile && myProfile.birthday && myProfile.birthday.length > 5) {
+    myProfile = { ...myProfile, birthday: birthdayMonthDay(myProfile.birthday) };
+    await Store.saveProfile(me.email, myProfile);
+  }
   blocks = buildBlocks();
   render();
 }
@@ -2905,6 +3604,7 @@ function renderActingFor() {
 
 function setActingFor(email) {
   actingFor = email === me.email ? null : email;
+  renderNoClasses();
   resetForm();
   renderActingFor();
   renderMyEntries();
@@ -2920,13 +3620,22 @@ function showPage(page) {
   document.getElementById("page-profile").hidden = page !== "profile";
   document.getElementById("page-directory").hidden = page !== "directory";
   if (page === "profile") fillProfileForm();
-  for (const link of document.querySelectorAll(".page-link")) {
+  for (const link of document.querySelectorAll(".page-link, .menu-item[data-page]")) {
     if (link.dataset.page === page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
+  // Schedules is highlighted when one of the pages in its menu is open.
+  const schedules = document.getElementById("schedules-button");
+  if (["calendar", "update", "booking"].includes(page)) schedules.setAttribute("aria-current", "page");
+  else schedules.removeAttribute("aria-current");
+  const manage = document.getElementById("manage-button");
+  if (page === "manage") manage.setAttribute("aria-current", "page");
+  else manage.removeAttribute("aria-current");
 }
 
 function showScreen(screen) {
+  document.getElementById("profile-menu-profile").hidden = screen !== "app";
+  setProfileMenu(false);
   document.getElementById("signin-screen").hidden = screen !== "signin";
   document.getElementById("not-listed-screen").hidden = screen !== "not-listed";
   document.getElementById("app-screen").hidden = screen !== "app";
@@ -2935,6 +3644,10 @@ function showScreen(screen) {
 }
 
 async function handleAuthChange(user) {
+  if (stopWatchingPending) stopWatchingPending();
+  stopWatchingPending = null;
+  livePending = null;
+  reviewFilter = "pending";
   me = null;
   members = [];
   availability = [];
@@ -2946,7 +3659,12 @@ async function handleAuthChange(user) {
   myProfile = null;
   directory = [];
   profiles = [];
+  privatePhones = [];
+  noClasses = [];
+  calendarSettings = { academic: null, holidays: null };
   onboarding = false;
+  directoryTab = "all";
+  availabilityRoles = new Set();
   bookingFilter = "open";
   blocks = [];
   actingFor = null;
@@ -2982,6 +3700,7 @@ async function handleAuthChange(user) {
     }
     showScreen("app");
     await refresh();
+    watchPendingRequests();
     setCalendarView(isReviewer() ? "lab" : "unavailability");
     const hasPending = isReviewer() &&
       (timeOff.some((request) => request.status === "pending") || changeRequests.some((request) => request.status === "pending"));
@@ -2992,13 +3711,19 @@ async function handleAuthChange(user) {
     const hash = (window.location || {}).hash || "";
     const fromEmail = isReviewer() && hash === "#review";
     const visitFromEmail = isReviewer() && hash.startsWith("#visit=") ? decodeURIComponent(hash.slice(7)) : "";
-    // The first time someone signs in, they fill in their profile before anything else.
-    if (!myProfile) {
+    // The first time someone signs in, they fill in their profile before anything else, and again if it's
+    // missing something added since, such as a last name.
+    if (!myProfile || !myLastName()) {
       startOnboarding();
       return;
     }
     showPage((hasPending || fromEmail) && !visitFromEmail ? "manage" : "calendar");
     if (visitFromEmail) openVisitFromLink(visitFromEmail);
+    // Reminders to add the next USC dates link to #website.
+    if (isReviewer() && hash === "#website") {
+      showPage("manage");
+      showManageTab("website");
+    }
   } catch (error) {
     showMessage(`Couldn't load your unavailable times (${friendlyError(error)}).`);
   }
@@ -3032,7 +3757,10 @@ function wireUpEvents() {
       showTab(button.dataset.tab);
     });
   }
-  semesterEl.addEventListener("change", applySemesterDates);
+  semesterEl.addEventListener("change", () => {
+    applySemesterDates();
+    renderNoClasses();
+  });
   document.getElementById("acting-for").addEventListener("change", (event) => setActingFor(event.target.value));
   document.getElementById("mode-new").addEventListener("change", applySemesterDates);
   document.getElementById("mode-changed").addEventListener("change", applySemesterDates);
@@ -3070,8 +3798,30 @@ function wireUpEvents() {
     });
   }
   document.getElementById("dialog-close").addEventListener("click", () => dialogEl.close());
-  document.addEventListener("click", closeMemberPicker);
-  document.addEventListener("keydown", closeMemberPicker);
+  document.addEventListener("click", closePopups);
+  document.addEventListener("keydown", closePopups);
+  document.getElementById("profile-button").addEventListener("click", () => {
+    setProfileMenu(document.getElementById("profile-menu").hidden);
+  });
+  document.getElementById("profile-menu").addEventListener("click", () => setProfileMenu(false));
+  for (const [, buttonId, menuId] of NAV_MENUS) {
+    document.getElementById(buttonId).addEventListener("click", () => setNavMenu(buttonId, menuId, document.getElementById(menuId).hidden));
+    document.getElementById(menuId).addEventListener("click", () => setNavMenu(buttonId, menuId, false));
+  }
+  // Each Lab Management tab is also in its menu.
+  for (const item of document.querySelectorAll("[data-manage-go]")) {
+    item.addEventListener("click", () => {
+      showPage("manage");
+      showManageTab(item.dataset.manageGo);
+    });
+  }
+  document.getElementById("save-academic").addEventListener("click", () => saveWebsiteData("academic"));
+  document.getElementById("save-holidays").addEventListener("click", () => saveWebsiteData("holidays"));
+  // The logo and title go home to the calendar, except while someone is still filling in their profile.
+  document.getElementById("home-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    if (me && !onboarding) showPage("calendar");
+  });
   // Closing a dialog redraws the week, so a block dragged but not saved goes back where it was.
   dialogEl.addEventListener("close", () => {
     if (me) renderWeek();

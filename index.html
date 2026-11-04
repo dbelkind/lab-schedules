@@ -3,31 +3,58 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lifespan Cognition Lab Schedule</title>
+  <title>Lifespan Cognition Lab - Member Portal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=22">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
   <header class="top-bar">
     <div class="top-bar-inner">
-      <div class="brand">
-        <img class="brand-mark" src="assets/logo-mark.png" alt="" width="50" height="40">
-        <h1>Lifespan Cognition Lab Schedule</h1>
-      </div>
+      <h1 class="brand">
+        <a id="home-link" class="brand-link" href="./" title="Go to the calendar">
+          <img class="brand-mark" src="assets/logo-mark.png" alt="" width="50" height="40">
+          <span class="brand-title">Lifespan Cognition Lab - Member Portal</span>
+        </a>
+      </h1>
       <nav id="page-nav" class="page-nav" aria-label="Pages" hidden>
-        <button type="button" class="page-link" data-page="calendar" aria-current="page">Calendar</button>
-        <button type="button" class="page-link" data-page="update">Update Availability</button>
-        <button id="booking-link" type="button" class="page-link" data-page="booking" hidden>Booking</button>
-        <button type="button" class="page-link" data-page="directory">Directory</button>
-        <button type="button" class="page-link" data-page="profile">My Profile</button>
-        <button id="manage-link" type="button" class="page-link" data-page="manage" hidden>Lab Management</button>
+        <div id="schedules-wrap" class="nav-menu">
+          <button id="schedules-button" type="button" class="page-link nav-menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="schedules-menu">
+            Schedules <span class="nav-caret" aria-hidden="true"></span>
+          </button>
+          <div id="schedules-menu" class="nav-dropdown" role="menu" hidden>
+            <button type="button" class="menu-item" role="menuitem" data-page="calendar">Lab Calendar</button>
+            <button type="button" class="menu-item" role="menuitem" data-page="update">Update your Availability</button>
+            <button id="booking-link" type="button" class="menu-item" role="menuitem" data-page="booking" hidden>Booking</button>
+          </div>
+        </div>
+        <button type="button" class="page-link" data-page="directory">Lab Directory</button>
+        <div id="manage-link" class="nav-menu" hidden>
+          <button id="manage-button" type="button" class="page-link nav-menu-button has-badge" aria-haspopup="menu" aria-expanded="false" aria-controls="manage-menu">
+            Lab Management <span class="nav-caret" aria-hidden="true"></span><span id="manage-badge" class="count-badge" hidden></span>
+          </button>
+          <div id="manage-menu" class="nav-dropdown" role="menu" hidden>
+            <button type="button" class="menu-item has-badge" role="menuitem" data-manage-go="review">Review requests<span id="manage-menu-badge" class="count-badge inline" hidden></span></button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="members">Lab members</button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="website">Website management</button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="settings">Settings</button>
+          </div>
+        </div>
       </nav>
       <div id="user-bar" class="user-bar" hidden>
-        <span id="user-email" class="user-email"></span>
-        <button id="sign-out" type="button" class="secondary small">Sign out</button>
+        <button id="profile-button" type="button" class="profile-button" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-menu">
+          <span class="profile-avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="8.5" r="4"/><path d="M4 20.5c0-4.1 3.6-6.5 8-6.5s8 2.4 8 6.5z"/></svg>
+          </span>
+          <span id="user-email" class="user-email"></span>
+          <span class="profile-caret" aria-hidden="true"></span>
+        </button>
+        <div id="profile-menu" class="profile-menu" role="menu" hidden>
+          <button id="profile-menu-profile" type="button" class="menu-item" role="menuitem" data-page="profile">My Profile</button>
+          <button id="sign-out" type="button" class="menu-item" role="menuitem">Sign out</button>
+        </div>
       </div>
     </div>
   </header>
@@ -56,10 +83,13 @@
       </div>
       <div id="view-switch" class="segmented" role="group" aria-label="Calendar view" hidden>
         <button type="button" data-view="unavailability" aria-pressed="true">Unavailability</button>
+        <button type="button" data-view="availability" aria-pressed="false">Availability</button>
         <button type="button" data-view="lab" aria-pressed="false">Lab Events</button>
+        <button type="button" data-view="checker" aria-pressed="false">Availability Checker</button>
       </div>
     </div>
 
+    <div id="calendar-body">
     <div class="toolbar">
       <button id="today" type="button" class="nav-button wide">Today</button>
       <button id="prev-week" type="button" class="nav-button" aria-label="Previous week">&lsaquo;</button>
@@ -68,7 +98,8 @@
       <span id="calendar-status" class="status calendar-status" role="status"></span>
     </div>
 
-    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update Availability</button>.</p>
+    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update your Availability</button>.</p>
+    <div id="role-filters" class="role-filters" aria-label="Filter by role" hidden></div>
     <div id="filters" class="filters" aria-label="Filter by lab member"></div>
 
     <div class="calendar-layout">
@@ -88,6 +119,30 @@
     </div>
 
     <p class="muted source-note">USC dates come from the <a href="https://usc.edu/academic-calendar/">official academic calendar</a> and cover Fall 2026 through Summer 2029. Shaded days are holidays or breaks, when classes aren't shown.</p>
+    </div>
+
+    <div id="availability-checker" class="checker-card" hidden>
+      <div class="field-row">
+        <label class="field">Date
+          <input id="check-date" type="date">
+        </label>
+        <label class="field">From
+          <input id="check-start" type="time" value="09:00">
+        </label>
+        <label class="field">Until
+          <input id="check-end" type="time" value="13:00">
+        </label>
+        <label class="field">Check
+          <select id="check-kind">
+            <option value="any">Who's free</option>
+            <option value="full">As a full visit (4 hours from the start)</option>
+            <option value="lab">As a lab portion</option>
+            <option value="scan">As a scan</option>
+          </select>
+        </label>
+      </div>
+      <div id="check-results"></div>
+    </div>
     </section>
 
     <section id="page-update" class="upload" hidden>
@@ -123,6 +178,7 @@
         <label class="field">Semester
           <select id="semester"></select>
         </label>
+        <div id="no-classes" class="no-classes"></div>
 
         <label class="field">Schedule file (PDF, PNG, JPG or WebP)
           <input id="schedule-file" type="file" accept=".pdf,application/pdf,image/png,image/jpeg,image/webp">
@@ -201,11 +257,23 @@
       <h2 id="profile-heading">My Profile</h2>
       <p id="profile-intro" class="muted">Keep your details up to date.</p>
       <div class="field-row">
+        <label class="field">First name
+          <input id="profile-first-name" type="text" disabled>
+        </label>
+        <label class="field">Last name
+          <input id="profile-last-name" type="text" maxlength="60" autocomplete="family-name">
+        </label>
+      </div>
+      <p class="muted field-note">Your first name comes from the lab list. Ask a lab manager if it needs changing.</p>
+      <div class="field-row">
         <label class="field">Phone number
           <input id="profile-phone" type="tel" autocomplete="tel" maxlength="30">
         </label>
-        <label class="field">Date of birth
-          <input id="profile-birthday" type="date">
+        <label class="field">Birthday
+          <select id="profile-birth-month"></select>
+        </label>
+        <label class="field">Day
+          <select id="profile-birth-day"></select>
         </label>
       </div>
       <div class="field-row">
@@ -227,17 +295,23 @@
           <input id="profile-dessert" type="text" maxlength="100" autocomplete="off">
         </label>
       </div>
-      <p class="muted">Your phone number is shown in the lab directory to everyone in the lab. Everything else is only seen by the lab managers, who are reminded before birthdays and graduations.</p>
+      <p class="muted">Your name and phone number are shown in the lab directory to everyone in the lab (a PI's phone number isn't shown to RAs). Everything else is only seen by the lab managers, who are reminded before birthdays and graduations.</p>
       <p id="profile-status" class="status" role="status"></p>
       <button id="save-profile" type="button" class="primary">Save profile</button>
     </section>
 
-    <section id="page-directory" class="upload" hidden>
-      <h2>Lab Directory</h2>
-      <p class="muted">Everyone in the lab, with their role, email and phone number. Change your own under My Profile.</p>
+    <section id="page-directory" class="upload wide" hidden>
+      <div class="directory-hero">
+        <div>
+          <h2>Lab Directory</h2>
+          <p class="muted">Everyone in the lab, with their role, email and phone number. Change your own under My Profile in the menu at the top right.</p>
+        </div>
+        <div id="directory-counts" class="directory-counts"></div>
+      </div>
+      <div id="directory-tabs" class="pill-tabs" role="tablist" aria-label="Show"></div>
       <div id="directory-list"></div>
       <div id="manager-details" hidden>
-        <h3>Birthdays, graduation and favorites</h3>
+        <h3>Lab Birthdays, Grad Dates, and More</h3>
         <p class="muted">Only lab managers can see this.</p>
         <div id="manager-details-list"></div>
       </div>
@@ -258,45 +332,38 @@
 
     <section id="page-manage" class="upload" hidden>
       <h2>Lab Management</h2>
-      <p class="muted">Review requests from lab members and manage who has access and what they're trained for.</p>
+      <p class="muted">Review requests from lab members, manage who has access and what they're trained for, and choose your emails.</p>
 
       <div class="tabs" role="tablist">
-        <button type="button" class="manage-tab" role="tab" data-manage="review" aria-selected="true">Review requests</button>
-        <button type="button" class="manage-tab" role="tab" data-manage="available" aria-selected="false">Who's available</button>
+        <button type="button" class="manage-tab has-badge" role="tab" data-manage="review" aria-selected="true">Review requests<span id="review-badge" class="count-badge" hidden></span></button>
         <button type="button" class="manage-tab" role="tab" data-manage="members" aria-selected="false">Lab members</button>
-        <button type="button" class="manage-tab" role="tab" data-manage="me" aria-selected="false">My information</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="website" aria-selected="false">Website management</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="settings" aria-selected="false">Settings</button>
       </div>
 
       <div id="manage-review">
+        <div id="review-filter" class="pill-tabs review-filter" role="tablist" aria-label="Show requests"></div>
         <div id="review-list"></div>
       </div>
 
-      <div id="manage-available" hidden>
-        <p class="muted">See who could work at any time, not only during visits. Pick a day and times, or test them as a visit to see whether it could be staffed.</p>
-        <div class="field-row">
-          <label class="field">Date
-            <input id="check-date" type="date">
-          </label>
-          <label class="field">From
-            <input id="check-start" type="time" value="09:00">
-          </label>
-          <label class="field">Until
-            <input id="check-end" type="time" value="13:00">
-          </label>
-          <label class="field">Check
-            <select id="check-kind">
-              <option value="any">Who's free</option>
-              <option value="full">As a full visit (4 hours from the start)</option>
-              <option value="lab">As a lab portion</option>
-              <option value="scan">As a scan</option>
-            </select>
-          </label>
-        </div>
-        <div id="check-results"></div>
+      <div id="manage-website" hidden>
+        <p class="muted">The USC academic calendar and staff holidays the site uses: semesters limit when class times show, holidays and breaks shade the calendar, and no participant visits are scheduled on staff holidays. Add each new year's dates from <a href="https://usc.edu/academic-calendar/">USC's academic calendar</a> and USC's paid holidays policy; lab managers are emailed when they're running out.</p>
+        <div id="website-coverage" class="coverage"></div>
+        <h3>Semesters</h3>
+        <p class="muted">Finals dates are optional: without them, the USC "Final exams" event just after classes end is used.</p>
+        <div id="semesters-editor"></div>
+        <h3>Holidays, breaks and other USC dates</h3>
+        <div id="events-editor"></div>
+        <button id="save-academic" type="button" class="primary">Save academic calendar</button>
+        <h3>Staff holidays</h3>
+        <p class="muted">Days the lab is closed, when no participant visits are scheduled. A holiday on a Saturday is observed the Friday before, and one on a Sunday the Monday after.</p>
+        <div id="holidays-editor"></div>
+        <button id="save-holidays" type="button" class="primary">Save staff holidays</button>
+        <p id="website-status" class="status" role="status"></p>
       </div>
 
-      <div id="manage-me" hidden>
-        <p class="muted">Your own details and training. Your name and role are changed the same way as anyone else's, by adding your email again under Lab members.</p>
+      <div id="manage-settings" hidden>
+        <p class="muted">Choose which emails you get. Your profile is under My Profile in the menu at the top right, and your own training is under Lab members with everyone else's.</p>
         <div id="my-info"></div>
       </div>
 
@@ -332,6 +399,10 @@
     </div>
   </main>
 
+  <footer class="site-footer">
+    Website issue? For any questions or assistance, please contact the lab manager (<a href="mailto:dbelkind@usc.edu">dbelkind@usc.edu</a>)
+  </footer>
+
   <dialog id="event-dialog" class="event-dialog" aria-labelledby="dialog-title">
     <div class="dialog-head">
       <h2 id="dialog-title"></h2>
@@ -346,9 +417,9 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" integrity="sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" integrity="sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3" crossorigin="anonymous"></script>
   <script src="firebase-config.js?v=4"></script>
-  <script src="store.js?v=6"></script>
+  <script src="store.js?v=10"></script>
   <script src="parser.js?v=2"></script>
-  <script src="scheduling.js?v=12"></script>
-  <script src="app.js?v=26"></script>
+  <script src="scheduling.js?v=14"></script>
+  <script src="app.js?v=31"></script>
 </body>
 </html>
