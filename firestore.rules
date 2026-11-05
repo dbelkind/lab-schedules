@@ -195,22 +195,30 @@ service cloud.firestore {
     }
 
     function appointmentKeys() {
-      return ['date', 'defaultFor', 'cancelled', 'lab', 'scan', 'booking', 'bookedBy', 'bookedByName', 'bookedAt'];
+      return ['date', 'defaultFor', 'cancelled', 'lab', 'scan', 'booking', 'bookedBy', 'bookedByName', 'bookedAt',
+        'requestedStart', 'confirmed', 'confirmedBy', 'confirmedAt'];
     }
     function bookingKeys() {
-      return ['booking', 'bookedBy', 'bookedByName', 'bookedAt'];
+      return ['booking', 'bookedBy', 'bookedByName', 'bookedAt', 'requestedStart', 'confirmed'];
     }
+    // A booker can ask for a start between 8:00 and 10:00 AM, which a reviewer approves when confirming. Booking or
+    // cancelling a booking always leaves the visit unconfirmed, so a reviewer confirms each booking.
     function validBookingBy(data) {
       return data.booking in ['booked', 'rebooking']
         && data.bookedBy == email()
         && data.bookedByName is string && data.bookedByName.size() <= 100
-        && data.bookedAt is string;
+        && data.bookedAt is string
+        && (!('requestedStart' in data) || data.requestedStart == ''
+          || (data.requestedStart is string && data.requestedStart >= '08:00' && data.requestedStart <= '10:00'))
+        && data.get('confirmed', false) == false;
     }
 
-    // Visits hold no participant information, only times and whether they're booked.
-    // Bookers can only book a visit or cancel its booking, from the spring 2027 visits on.
+    // Visits hold no participant information, only times and whether they're booked and confirmed.
+    // Bookers can only book a visit (asking for another start time if needed) or cancel its booking, from the spring
+    // 2027 visits on. Only reviewers confirm bookings and change visit times.
     match /appointments/{id} {
-      allow read: if isReviewer() || isBooker();
+      // Everyone in the lab sees the Lab Calendar's open slots and scheduled visits; staffing is kept separately.
+      allow read: if isMember();
       allow create, update: if isReviewer()
         && request.resource.data.keys().hasOnly(appointmentKeys())
         && request.resource.data.date is string;

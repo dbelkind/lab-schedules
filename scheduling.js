@@ -135,24 +135,47 @@ function lengthText(minutes) {
   return parts.join(" ");
 }
 
-// The lab portion normally starts at 9:00 AM and the scan at 11:00 AM, each lasting 2 hours. Anything else is
-// called out, so nobody turns up at the usual time by mistake. Pass "lab" or "scan" for just that portion: a shorter
-// scan only affects the scan, while a scan moved earlier cuts the lab portion short too, so both are flagged.
-// Without one, it covers the whole visit, which is what matters to bookers and participants.
+// Booked and confirmed visits that don't start at 9:00 AM get 🕒 [SEE TIME], so nobody turns up at the usual time
+// by mistake. A scan shorter than 2 hours is noted too, but only for the scan: pass "scan" for the scan's notes,
+// "lab" for the lab portion's, or nothing for the whole visit. Open slots aren't flagged.
 function unusualTimes(appointment, only) {
+  if (!isBooked(appointment)) return [];
   const notes = [];
-  for (const kind of only ? [only] : ["lab", "scan"]) {
-    const slot = appointment[kind];
-    if (!slot) continue;
-    const usual = DEFAULT_SLOTS[kind];
-    const name = kind === "lab" ? "Lab portion" : "Scan";
-    if (slot.start !== usual.start) notes.push(`${name} starts at ${clockTime(timeToMinutes(slot.start))} instead of ${clockTime(timeToMinutes(usual.start))}`);
-    const length = timeToMinutes(slot.end) - timeToMinutes(slot.start);
-    const usualLength = timeToMinutes(usual.end) - timeToMinutes(usual.start);
-    if (length !== usualLength) notes.push(`${name} is ${lengthText(length)} long instead of ${lengthText(usualLength)}`);
+  const start = visitWindow(appointment).start;
+  const usualStart = timeToMinutes(DEFAULT_SLOTS.lab.start);
+  if (start !== usualStart) notes.push(`Starts at ${clockTime(start)} instead of ${clockTime(usualStart)}`);
+  if (only !== "lab" && appointment.scan) {
+    const length = timeToMinutes(appointment.scan.end) - timeToMinutes(appointment.scan.start);
+    if (length < 120) notes.push(`Scan is only ${lengthText(length)} long`);
   }
   return notes;
 }
+
+// Where a visit is in booking: "open" (including a cancelled booking waiting to be rebooked), "booked" (waiting for
+// a reviewer to confirm it) or "confirmed".
+function visitStatus(appointment) {
+  if (appointment.booking !== "booked") return "open";
+  return appointment.confirmed ? "confirmed" : "booked";
+}
+
+function isBooked(appointment) {
+  return visitStatus(appointment) !== "open";
+}
+
+// A visit's lab portion and scan from its start time and scan times: the lab portion runs 2 hours from the start,
+// or until the scan if that's sooner. Times are "HH:MM".
+function visitPartsFrom(start, scanStart, scanEnd, wandingRequired = true) {
+  const from = timeToMinutes(start);
+  const scanFrom = timeToMinutes(scanStart);
+  const labEnd = scanFrom > from && scanFrom < from + 120 ? scanFrom : from + 120;
+  return {
+    lab: { start, end: clockOf(labEnd) },
+    scan: { start: scanStart, end: scanEnd, wandingRequired },
+  };
+}
+
+// The start times a booker can ask for instead of the slot's, which a reviewer has to approve.
+const REQUESTABLE_STARTS = ["08:00", "08:15", "08:30", "08:45", "09:00", "09:15", "09:30", "09:45", "10:00"];
 
 function visitPartsLabel(appointment) {
   if (appointment.lab && appointment.scan) return "";
@@ -710,24 +733,25 @@ function checkAssignment(iso, appointment, assignment, data) {
 }
 
 // The email a booker sends the reviewers from their own USC account when they book a visit, with a blank Screener ID
-// line for them to fill in. `when` is the visit's day and times, `parts` its lab and scan times, `seeTime` any unusual
-// times, and `link` its staffing on the site. The site drafts it; the Apps Script sends a sample in its test emails.
-function bookingEmail({ when, parts, seeTime, link }) {
+// line for them to fill in. `when` is the visit's day and times, `parts` its lab and scan times, `requestedStart`
+// any other start time they asked for, and `link` the visit on the site. The site drafts it; the Apps Script sends a
+// sample in its test emails.
+function bookingEmail({ when, parts, requestedStart, link }) {
   return {
-    subject: `Booked: ${when}${seeTime.length ? ` ${SEE_TIME}` : ""}`,
+    subject: `Booked: ${when}${requestedStart ? " (start time change requested)" : ""}`,
     body: [
       "A participant is booked for this visit.",
       "",
       `Visit: ${when}`,
       parts,
-      ...(seeTime.length ? [`${SEE_TIME} These aren't the usual times:`, ...seeTime.map((note) => `- ${note}`)] : []),
+      ...(requestedStart ? [`Requested start time: ${requestedStart} (needs your approval)`] : []),
       "",
       "Screener ID: ",
       "",
       "For reviewers:",
-      "1. Create the confirmed appointment in the lab's appointment calendar in Google Calendar, with the participant information above. Participant information goes there only, never on the lab's Member Portal website.",
-      `2. Review the suggested staffing and approve it to confirm the visit: ${link}`,
-      "   Approving the staffing sends the staff their calendar invites and emails automatically.",
+      `1. Confirm the booking on the Lab Calendar and record the scan time${requestedStart ? ", approving or changing the requested start time" : ""}: ${link}`,
+      "2. Staff it from the suggested staffing. Approving the staffing sends the staff their calendar invites and emails automatically.",
+      "3. Add the appointment to the lab's appointment calendar in Google Calendar, with the participant ID and other study details. Participant information goes there only, never on the lab's Researcher Portal website.",
     ].join("\n"),
   };
 }

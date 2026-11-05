@@ -58,7 +58,12 @@ let memberPickerOpen = false;
 let changeRequests = [];
 let appointments = [];
 let staffHolidays = [];
-let calendarView = "unavailability";
+// The week calendar's view: "appointments" (the Lab Calendar), "mine" (your own times, under Update your
+// Availability), and for reviewers under Administrative Schedules "unavailability", "availability", "staffing" and
+// "checker".
+let calendarView = "appointments";
+let adminView = "staffing";
+let teamView = "unavailability";
 let staffing = [];
 let reviewerContacts = [];
 let bookingFilter = "open";
@@ -73,6 +78,8 @@ let calendarSettings = { academic: null, holidays: null };
 // True until someone has filled in their profile the first time they sign in.
 let onboarding = false;
 let directoryTab = "all";
+// Lab managers switch the directory between the Lab Directory and Birthdays, Grad Dates, and More.
+let directoryView = "directory";
 let directorySort = { key: "name", dir: 1 };
 let detailsSort = { key: "name", dir: 1 };
 // The roles ticked on the Availability calendar's filter, by leaf key.
@@ -171,18 +178,18 @@ function blocksOn(date) {
   const iso = dateToIso(date);
   const dayName = DAYS[(date.getDay() + 6) % 7];
   return blocks.filter((block) =>
-    block.type !== "ooo" && !hidden.has(block.member) && block.from <= iso && (!block.to || iso <= block.to) &&
+    block.type !== "ooo" && showsBlock(block) && block.from <= iso && (!block.to || iso <= block.to) &&
     block.days.includes(dayName) && (block.type !== "class" || classesMeet(iso)));
 }
 
 function outOfOfficeOn(iso) {
   return blocks.filter((block) =>
-    block.type === "ooo" && !block.start && !hidden.has(block.member) && block.from <= iso && iso <= block.to);
+    block.type === "ooo" && !block.start && showsBlock(block) && block.from <= iso && iso <= block.to);
 }
 
 function partDayTimeOffOn(iso) {
   return blocks.filter((block) =>
-    block.type === "ooo" && block.start && !hidden.has(block.member) && block.from <= iso && iso <= block.to);
+    block.type === "ooo" && block.start && showsBlock(block) && block.from <= iso && iso <= block.to);
 }
 
 function isReviewer() {
@@ -240,10 +247,10 @@ function renderFilters() {
     });
     return chip;
   }));
-  filtersEl.hidden = !isReviewer() || calendarView === "lab" || calendarView === "checker";
+  filtersEl.hidden = !isReviewer() || !["unavailability", "availability"].includes(calendarView);
   document.getElementById("role-filters").hidden = !isAvailabilityView();
   if (isAvailabilityView()) renderRoleFilters();
-  document.getElementById("empty").hidden = blocks.length > 0;
+  document.getElementById("empty").hidden = !isMineView() || blocks.some((block) => block.ownerEmail === targetEmail());
 }
 
 // Overlapping blocks in a day share the column width, side by side.
@@ -305,8 +312,22 @@ function placeBlock(node, start, end, lane, laneCount) {
   node.style.width = `${100 / laneCount}%`;
 }
 
+// The Staffing view (it was Lab Events): who's available for each part of each visit.
 function isLabView() {
-  return calendarView === "lab" && isReviewer();
+  return calendarView === "staffing" && isReviewer();
+}
+
+function isAppointmentsView() {
+  return calendarView === "appointments";
+}
+
+function isMineView() {
+  return calendarView === "mine";
+}
+
+// My calendar only shows the person whose times are being entered; Unavailability shows everyone not turned off.
+function showsBlock(block) {
+  return isMineView() ? block.ownerEmail === targetEmail() : !hidden.has(block.member);
 }
 
 function isAvailabilityView() {
@@ -324,9 +345,10 @@ function renderWeek() {
   weekLabelEl.textContent = formatWeekLabel(weekDates[0], weekDates[6]);
   const labView = isLabView();
   const availabilityView = isAvailabilityView();
+  const appointmentsView = isAppointmentsView();
 
   // The hours stay the same from week to week, so the grid doesn't jump around while navigating.
-  const timed = availabilityView ? [] : labView
+  const timed = availabilityView ? [] : labView || appointmentsView
     ? [DEFAULT_SLOTS.lab, DEFAULT_SLOTS.scan, ...appointments.flatMap((appointment) => [appointment.lab, appointment.scan]).filter(Boolean)]
     : blocks.filter((block) => block.type !== "ooo" || block.start);
   const firstHour = Math.min(8, ...timed.map((block) => Math.floor(toMinutes(block.start) / 60)));
@@ -335,6 +357,7 @@ function renderWeek() {
   calendarEl.style.setProperty("--hour-count", lastHour - firstHour);
   calendarEl.classList.toggle("lab-view", labView);
   calendarEl.classList.toggle("availability-view", availabilityView);
+  calendarEl.classList.toggle("appointments-view", appointmentsView);
 
   const headers = weekDates.map((date) => {
     const header = el("div", `day-header${sameDay(date, today) ? " today" : ""}`);
@@ -345,6 +368,7 @@ function renderWeek() {
   const allDayCells = weekDates.map((date) => {
     const iso = dateToIso(date);
     if (labView) return labAllDay(iso);
+    if (appointmentsView) return availabilityAllDay(iso);
     return availabilityView ? availabilityAllDay(iso) : unavailabilityAllDay(iso, colorOf);
   });
 
@@ -357,12 +381,15 @@ function renderWeek() {
 
   const columns = weekDates.map((date) => {
     const iso = dateToIso(date);
-    const offDay = labView || availabilityView ? Boolean(staffHolidayOn(iso, staffHolidays)) : isDayOff(iso);
+    const offDay = labView || availabilityView || appointmentsView ? Boolean(staffHolidayOn(iso, staffHolidays)) : isDayOff(iso);
     const column = el("div", `day${sameDay(date, today) ? " today" : ""}${offDay ? " day-off" : ""}`);
     if (labView) renderLabColumn(column, iso);
+    else if (appointmentsView) renderAppointmentsColumn(column, iso);
     else if (availabilityView) renderAvailabilityColumn(column, iso, colorOf);
     else renderUnavailabilityColumn(column, date, colorOf);
-    if (!availabilityView) enableCreate(column, iso, labView ? openNewVisitDialog : openNewConflictDialog);
+    // Dragging across empty time adds a visit (reviewers) or an unavailable time.
+    if (labView || (appointmentsView && isReviewer())) enableCreate(column, iso, openNewVisitDialog);
+    else if (!availabilityView && !appointmentsView) enableCreate(column, iso, openNewConflictDialog);
     return column;
   });
 
@@ -404,7 +431,7 @@ function matchesRoleFilter(person) {
 }
 
 // A group's box is ticked when everything in it is, and half-ticked when some of it is.
-function filterBox(node) {
+function filterBox(node, depth) {
   const leaves = filterLeaves(node);
   const picked = leaves.filter((leaf) => availabilityRoles.has(leaf.key)).length;
   const label = el("label", `role-option${node.children ? " role-group-label" : ""}`);
@@ -423,16 +450,17 @@ function filterBox(node) {
   });
   const count = members.filter((member) => leaves.some((leaf) => leafMatches(leaf, member))).length;
   label.append(box, el("span", "", node.label), el("span", "role-count", String(count)));
-  const item = el("li");
+  const item = el("div", depth === 0 ? "role-group" : "role-item");
   item.append(label);
   if (node.children) {
-    const list = el("ul", "role-tree");
-    list.append(...node.children.map(filterBox));
+    const list = el("div", "role-tree");
+    for (const child of node.children) list.append(filterBox(child, depth + 1));
     item.append(list);
   }
   return item;
 }
 
+// If drawing the filter ever fails, it says so on the page instead of quietly leaving groups out.
 function renderRoleFilters() {
   const panel = document.getElementById("role-filters");
   const head = el("div", "role-filters-head");
@@ -448,8 +476,14 @@ function renderRoleFilters() {
     });
     head.append(clear);
   }
-  const groups = el("ul", "role-groups");
-  groups.append(...AVAILABILITY_FILTERS.map(filterBox));
+  const groups = el("div", "role-groups");
+  for (const group of AVAILABILITY_FILTERS) {
+    try {
+      groups.append(filterBox(group, 0));
+    } catch (error) {
+      groups.append(el("div", "role-group error", `Couldn't show ${group.label} (${error.message}).`));
+    }
+  }
   panel.replaceChildren(head, groups);
 }
 
@@ -617,8 +651,10 @@ function showsBooking(iso, appointment) {
   return Boolean(appointment.booking) || iso >= BOOKING_STARTS;
 }
 
-function bookingFields(status) {
-  return { booking: status, bookedBy: me.email, bookedByName: me.name, bookedAt: new Date().toISOString() };
+// Booking (or cancelling one) always leaves the visit for a reviewer to confirm. `requestedStart` is a start time
+// the booker asked for instead of the slot's, or "".
+function bookingFields(status, requestedStart = "") {
+  return { booking: status, bookedBy: me.email, bookedByName: me.name, bookedAt: new Date().toISOString(), requestedStart, confirmed: false };
 }
 
 function staffingFor(appointment) {
@@ -647,6 +683,7 @@ function renderLabColumn(column, iso) {
     );
     const chips = el("div", "slot-chips");
     if (unusualTimes(appointment, item.kind).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
+    if (visits.length > 1) chips.append(el("span", "slot-chip chip-many", `👥 ${visits.length} participants`));
     if (visitPartsLabel(appointment)) chips.append(el("span", "slot-chip", visitPartsLabel(appointment)));
     if (showsBooking(iso, appointment)) {
       chips.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, BOOKING_SHORT[appointment.booking || "open"]));
@@ -1156,6 +1193,8 @@ function appointmentData(appointment, changes) {
     ...(merged.booking
       ? { booking: merged.booking, bookedBy: merged.bookedBy, bookedByName: merged.bookedByName || "", bookedAt: merged.bookedAt }
       : {}),
+    ...(merged.requestedStart ? { requestedStart: merged.requestedStart } : {}),
+    ...(merged.confirmed ? { confirmed: true, confirmedBy: merged.confirmedBy, confirmedAt: merged.confirmedAt } : {}),
   };
 }
 
@@ -1180,8 +1219,8 @@ async function saveSlot(appointment, kind, slot) {
   await refresh();
 }
 
-async function setBooking(appointment, status) {
-  await Store.bookVisit(appointment, bookingFields(status));
+async function setBooking(appointment, status, requestedStart = "") {
+  await Store.bookVisit(appointment, bookingFields(status, requestedStart));
   pingSync();
   await refresh();
 }
@@ -1307,6 +1346,7 @@ function openSlotDialog(iso, appointment, kind) {
   openDialog(`${number ? `Visit ${number} · ` : ""}${SLOT_TITLES[kind]}`, body, actions);
 }
 
+// Links in emails end in #visit=<key>, which opens that visit on the Lab Calendar.
 function openVisitFromLink(key) {
   const date = key.startsWith("default-") ? key.slice("default-".length) : (appointments.find((appointment) => appointment.id === key) || {}).date;
   const appointment = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? visitsOn(date).find((visit) => visitKey(visit) === key) : null;
@@ -1315,8 +1355,9 @@ function openVisitFromLink(key) {
     return;
   }
   const [y, month, day] = date.split("-").map(Number);
+  showPage("calendar");
   goTo(new Date(y, month - 1, day));
-  openStaffingDialog(date, appointment);
+  openLabCalendarDialog(date, appointment);
 }
 
 function bookingSummary(appointment) {
@@ -1821,9 +1862,9 @@ function colorCell(color) {
   return cell;
 }
 
-// A table whose columns sort when their heading is clicked. Each column has a key, a label, a value to sort by
-// and a way to show it.
-function sortableTable(columns, rows, sort, onSort) {
+// A table whose columns sort when their heading is clicked. Each column has a key, a label, a value to sort by,
+// a way to show it, and optionally a width. With `fit`, long text wraps so the table fits the page.
+function sortableTable(columns, rows, sort, onSort, { fit = false } = {}) {
   const column = columns.find((item) => item.key === sort.key) || columns[0];
   const sorted = [...rows].sort((a, b) => {
     const x = column.sortValue(a);
@@ -1831,10 +1872,11 @@ function sortableTable(columns, rows, sort, onSort) {
     return (x < y ? -1 : x > y ? 1 : 0) * sort.dir || a.fullName.localeCompare(b.fullName);
   });
   const wrapper = el("div", "table-scroll");
-  const table = el("table", "data-table");
+  const table = el("table", `data-table${fit ? " fit" : ""}`);
   const head = el("tr");
   for (const item of columns) {
     const th = el("th");
+    if (item.width) th.style.width = item.width;
     const active = item.key === column.key;
     th.setAttribute("aria-sort", active ? (sort.dir === 1 ? "ascending" : "descending") : "none");
     const button = el("button", `sort-button${active ? " active" : ""}`);
@@ -1864,85 +1906,93 @@ function sortableTable(columns, rows, sort, onSort) {
 const byLastName = (row) => `${row.lastName || row.name} ${row.name}`.toLowerCase();
 const byTitle = (row) => TITLE_ORDER.indexOf(row.title);
 
-function renderDirectory() {
-  if (!me) return;
-  const viewerIsRa = !isReviewer() && !isGrad();
-  const people = directory.map((entry) => ({
+function directoryPeople() {
+  return directory.map((entry) => ({
     ...entry,
     fullName: entry.lastName ? `${entry.name} ${entry.lastName}` : entry.name,
     phone: phoneOf(entry.email),
   }));
+}
+
+function detailsRows() {
+  return members.map((member) => {
+    const entry = directory.find((item) => item.email === member.email) || {};
+    return {
+      name: member.name,
+      lastName: entry.lastName || "",
+      fullName: entry.lastName ? `${member.name} ${entry.lastName}` : member.name,
+      title: titleOf(member),
+      profile: profiles.find((item) => item.email === member.email),
+    };
+  });
+}
+
+function directoryTable(rows) {
+  const viewerIsRa = !isReviewer() && !isGrad();
+  return sortableTable([
+    { key: "name", label: "Name", sortValue: byLastName, render: personCell },
+    { key: "title", label: "Role", sortValue: byTitle, render: (row) => titleBadge(row.title) },
+    { key: "email", label: "Email", sortValue: (row) => row.email, render: (row) => linkTo(`mailto:${row.email}`, row.email) },
+    { key: "phone", label: "Phone", sortValue: (row) => row.phone || "~", render: (row) => {
+      if (row.phone) return linkTo(`tel:${row.phone.replace(/[^0-9+]/g, "")}`, row.phone);
+      return el("span", "muted", viewerIsRa && row.title === "PI" ? "Not shown to RAs" : "Not added yet");
+    } },
+  ], rows, directorySort, (sort) => {
+    directorySort = sort;
+    renderDirectory();
+  });
+}
+
+// Fits the page: column widths are set and long text wraps rather than scrolling sideways.
+function detailsTable(rows) {
+  const missing = (row, text) => (row.profile ? text(row.profile) : el("span", "muted", "Not filled in yet"));
+  const lower = (key) => (row) => (row.profile ? row.profile[key].toLowerCase() : "~");
+  return sortableTable([
+    { key: "name", label: "Name", width: "19%", sortValue: byLastName, render: personCell },
+    { key: "title", label: "Role", width: "12%", sortValue: byTitle, render: (row) => titleBadge(row.title) },
+    { key: "birthday", label: "Birthday", width: "10%", sortValue: (row) => (row.profile ? birthdayMonthDay(row.profile.birthday) : "~"), render: (row) => missing(row, (profile) => formatBirthday(profile.birthday)) },
+    { key: "graduation", label: "Expected graduation", width: "12%", sortValue: (row) => (row.profile && row.profile.graduation !== "n/a" ? row.profile.graduation : "~"), render: (row) => missing(row, (profile) => formatGraduation(profile.graduation)) },
+    { key: "color", label: "Favorite color", width: "13%", sortValue: lower("color"), render: (row) => missing(row, (profile) => colorCell(profile.color)) },
+    { key: "dessert", label: "Favorite dessert", width: "14%", sortValue: lower("dessert"), render: (row) => missing(row, (profile) => profile.dessert) },
+    { key: "dietary", label: "Dietary restrictions/allergies", width: "20%", sortValue: lower("dietary"), render: (row) => missing(row, (profile) => profile.dietary) },
+  ], rows, detailsSort, (sort) => {
+    detailsSort = sort;
+    renderDirectory();
+  }, { fit: true });
+}
+
+// One table at a time, with the roles as tabs along its bottom like a spreadsheet's sheets. Lab managers can switch
+// to Birthdays, Grad Dates, and More, which nobody else can see.
+function renderDirectory() {
+  if (!me) return;
+  if (!isReviewer()) directoryView = "directory";
+  const details = directoryView === "details";
+  document.getElementById("directory-views").hidden = !isReviewer();
+  for (const button of document.querySelectorAll("[data-directory-view]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.directoryView === directoryView));
+  }
+  document.getElementById("directory-heading").textContent = details ? "Lab Birthdays, Grad Dates, and More" : "Lab Directory";
+  document.getElementById("directory-intro").textContent = details
+    ? "Everyone's birthday, expected graduation, favorites and dietary restrictions/allergies. Only lab managers can see this."
+    : "Everyone in the lab, with their role, email and phone number. Change your own under My Profile in the menu at the top right.";
+  const rows = details ? detailsRows() : directoryPeople();
   const tab = DIRECTORY_TABS.find((item) => item.key === directoryTab) || DIRECTORY_TABS[0];
-  const inTab = (person) => !tab.titles || tab.titles.includes(person.title);
-
-  document.getElementById("directory-counts").replaceChildren(...TITLE_ORDER
-    .map((title) => [title, people.filter((person) => person.title === title).length])
-    .filter(([, count]) => count)
-    .map(([title, count]) => {
-      const chip = el("span", `count-chip title-${TITLE_CLASSES[title]}`);
-      chip.append(el("strong", "", String(count)), ` ${title}${count === 1 ? "" : title.endsWith("s") ? "" : "s"}`);
-      return chip;
-    }));
-
+  const shown = rows.filter((row) => !tab.titles || tab.titles.includes(row.title));
+  document.getElementById("directory-list").replaceChildren(shown.length
+    ? (details ? detailsTable(shown) : directoryTable(shown))
+    : el("p", "muted empty-note sheet-empty", "No one in this group yet."));
   document.getElementById("directory-tabs").replaceChildren(...DIRECTORY_TABS.map((item) => {
-    const button = el("button", "pill-tab");
+    const button = el("button", "sheet-tab");
     button.type = "button";
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", String(item.key === tab.key));
-    const count = people.filter((person) => !item.titles || item.titles.includes(person.title)).length;
-    button.append(item.label, el("span", "pill-count", String(count)));
+    button.append(item.label, el("span", "pill-count", String(rows.filter((row) => !item.titles || item.titles.includes(row.title)).length)));
     button.addEventListener("click", () => {
       directoryTab = item.key;
       renderDirectory();
     });
     return button;
   }));
-
-  const shown = people.filter(inTab);
-  document.getElementById("directory-list").replaceChildren(shown.length
-    ? sortableTable([
-      { key: "name", label: "Name", sortValue: byLastName, render: personCell },
-      { key: "title", label: "Role", sortValue: byTitle, render: (row) => titleBadge(row.title) },
-      { key: "email", label: "Email", sortValue: (row) => row.email, render: (row) => linkTo(`mailto:${row.email}`, row.email) },
-      { key: "phone", label: "Phone", sortValue: (row) => row.phone || "~", render: (row) => {
-        if (row.phone) return linkTo(`tel:${row.phone.replace(/[^0-9+]/g, "")}`, row.phone);
-        return el("span", "muted", viewerIsRa && row.title === "PI" ? "Not shown to RAs" : "Not added yet");
-      } },
-    ], shown, directorySort, (sort) => {
-      directorySort = sort;
-      renderDirectory();
-    })
-    : el("p", "muted empty-note", "No one in this group yet."));
-
-  const details = document.getElementById("manager-details");
-  details.hidden = !isReviewer();
-  if (!isReviewer()) return;
-  const rows = members.map((member) => {
-    const entry = directory.find((item) => item.email === member.email) || {};
-    const profile = profiles.find((item) => item.email === member.email);
-    return {
-      name: member.name,
-      lastName: entry.lastName || "",
-      fullName: entry.lastName ? `${member.name} ${entry.lastName}` : member.name,
-      title: titleOf(member),
-      profile,
-    };
-  }).filter(inTab);
-  const missing = (row, text) => (row.profile ? text(row.profile) : el("span", "muted", "Not filled in yet"));
-  document.getElementById("manager-details-list").replaceChildren(rows.length
-    ? sortableTable([
-      { key: "name", label: "Name", sortValue: byLastName, render: personCell },
-      { key: "title", label: "Role", sortValue: byTitle, render: (row) => titleBadge(row.title) },
-      { key: "birthday", label: "Birthday", sortValue: (row) => (row.profile ? birthdayMonthDay(row.profile.birthday) : "~"), render: (row) => missing(row, (profile) => formatBirthday(profile.birthday)) },
-      { key: "graduation", label: "Expected graduation", sortValue: (row) => (row.profile && row.profile.graduation !== "n/a" ? row.profile.graduation : "~"), render: (row) => missing(row, (profile) => formatGraduation(profile.graduation)) },
-      { key: "color", label: "Favorite color", sortValue: (row) => (row.profile ? row.profile.color.toLowerCase() : "~"), render: (row) => missing(row, (profile) => colorCell(profile.color)) },
-      { key: "dessert", label: "Favorite dessert", sortValue: (row) => (row.profile ? row.profile.dessert.toLowerCase() : "~"), render: (row) => missing(row, (profile) => profile.dessert) },
-      { key: "dietary", label: "Dietary restrictions/allergies", sortValue: (row) => (row.profile ? row.profile.dietary.toLowerCase() : "~"), render: (row) => missing(row, (profile) => profile.dietary) },
-    ], rows, detailsSort, (sort) => {
-      detailsSort = sort;
-      renderDirectory();
-    })
-    : el("p", "muted empty-note", "No one in this group yet."));
 }
 
 // --- Website management ---
@@ -2191,22 +2241,279 @@ function renderAvailabilityCheck() {
   out.replaceChildren(...nodes);
 }
 
+// --- The Lab Calendar: open slots and scheduled visits ---
+// Every weekday that isn't a staff holiday has an open 9:00 AM – 1:00 PM slot, from January 2027 and up to 60 days
+// ahead. Bookers book a slot; a reviewer confirms the booking, recording the scan time, and staffs it.
+
+function onLabCalendar(iso, appointment) {
+  return iso >= BOOKING_STARTS || Boolean(appointment.booking) || Boolean(appointment.confirmed);
+}
+
+function renderAppointmentsColumn(column, iso) {
+  const day = visitsOn(iso);
+  const visits = day.filter((appointment) => onLabCalendar(iso, appointment));
+  const items = visits.flatMap((appointment, index) => {
+    const status = visitStatus(appointment);
+    const number = day.length > 1 ? day.findIndex((visit) => visitKey(visit) === visitKey(appointment)) + 1 : 0;
+    // Confirmed visits show their lab portion and scan; open and booked ones are one block for the whole visit.
+    if (status !== "confirmed") {
+      const window = visitWindow(appointment);
+      return [{ start: minutesToTime(window.start), end: minutesToTime(window.end), appointment, status, number, part: null }];
+    }
+    return ["lab", "scan"].filter((kind) => appointment[kind])
+      .map((kind) => ({ start: appointment[kind].start, end: appointment[kind].end, appointment, status, number, part: kind }));
+  });
+  for (const { block: item, lane, laneCount } of layoutDay(items)) {
+    const { appointment, status, part } = item;
+    const node = el("div", `visit-block visit-${status}${appointment.booking === "rebooking" ? " visit-rebooking" : ""}`);
+    placeBlock(node, item.start, item.end, lane, laneCount);
+    const title = status === "open"
+      ? (appointment.booking === "rebooking" ? "Open slot · booking cancelled" : "Open participant slot")
+      : status === "booked" ? "BOOKED · waiting for confirmation" : `Scheduled · ${part === "lab" ? "Lab portion" : "Scan"}`;
+    node.append(el("strong", "", `${item.number ? `Visit ${item.number} · ` : ""}${title}`), el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`));
+    const chips = el("div", "slot-chips");
+    if (unusualTimes(appointment, part || undefined).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
+    if (day.length > 1) chips.append(el("span", "slot-chip chip-many", `👥 ${day.length} participants`));
+    if (status === "booked" && appointment.requestedStart) chips.append(el("span", "slot-chip chip-rebooking", `Asked to start ${formatTime(appointment.requestedStart)}`));
+    if (status === "confirmed" && isReviewer()) {
+      const doc = staffingFor(appointment);
+      chips.append(el("span", `slot-chip ${doc ? "chip-staffed" : "chip-open"}`, doc ? "Staffed" : "Not staffed yet"));
+    }
+    if (chips.children.length) node.append(chips);
+    makeClickable(node, () => openLabCalendarDialog(iso, appointment));
+    column.append(node);
+  }
+}
+
+// What clicking a visit on the Lab Calendar does depends on where it is in booking and who's looking.
+function openLabCalendarDialog(iso, appointment) {
+  const status = visitStatus(appointment);
+  if (isReviewer()) {
+    if (status === "open") return openSlotTimesDialog(iso, appointment);
+    if (status === "booked") return openConfirmDialog(iso, appointment);
+    return openScheduledDialog(iso, appointment);
+  }
+  if (isBooker() && status === "open") return openBookDialog(iso, appointment);
+  if (isBooker() && appointment.bookedBy === me.email) return openMyBookingDialog(iso, appointment);
+  return openVisitInfoDialog(iso, appointment);
+}
+
+function visitHeading(iso, appointment) {
+  const number = visitNumber(iso, appointment);
+  const count = visitsOn(iso).length;
+  const lines = [el("p", "muted", `${formatIsoWithDay(iso)} · ${number ? `Visit ${number}, ` : ""}${visitTimesText(appointment)}${visitPartsLabel(appointment) ? ` · ${visitPartsLabel(appointment)}` : ""}`)];
+  if (count > 1) lines.push(el("p", "notice", `👥 ${count} participants are scheduled this day.`));
+  return lines;
+}
+
+// A visit's times: for a full visit its start and scan times (the lab portion follows from them), or a single part's
+// own times.
+function visitTimesEditor(appointment, startTime) {
+  const node = el("div", "visit-times");
+  const preview = el("p", "muted visit-times-preview");
+  const wanding = el("input");
+  wanding.type = "checkbox";
+  wanding.checked = !appointment.scan || appointment.scan.wandingRequired !== false;
+  const wandingLabel = el("label", "check-field");
+  wandingLabel.append(wanding, "Wanding/taping required");
+  const full = Boolean(appointment.lab && appointment.scan);
+  const window = visitWindow(appointment);
+  const fields = full
+    ? { start: inputOf("time", startTime || minutesToTime(window.start)), scanStart: inputOf("time", appointment.scan.start), scanEnd: inputOf("time", appointment.scan.end) }
+    : { start: inputOf("time", (appointment.lab || appointment.scan).start), end: inputOf("time", (appointment.lab || appointment.scan).end) };
+  const read = () => {
+    const values = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.value]));
+    if (!Object.values(values).every(validTime)) throw new Error("Please fill in every time.");
+    if (full) {
+      if (values.scanEnd <= values.scanStart) throw new Error("The scan has to end after it starts.");
+      return visitPartsFrom(values.start, values.scanStart, values.scanEnd, wanding.checked);
+    }
+    if (values.end <= values.start) throw new Error("The end time must be after the start time.");
+    return appointment.lab ? { lab: { start: values.start, end: values.end }, scan: null } : { lab: null, scan: { start: values.start, end: values.end, wandingRequired: wanding.checked } };
+  };
+  const update = () => {
+    try {
+      const parts = read();
+      preview.textContent = partsText(parts);
+    } catch (error) {
+      preview.textContent = error.message;
+    }
+  };
+  const row = el("div", "field-row");
+  if (full) row.append(labeled("Visit starts", fields.start), labeled("Scan starts", fields.scanStart), labeled("Scan ends", fields.scanEnd));
+  else row.append(labeled("Starts", fields.start), labeled("Ends", fields.end));
+  for (const input of Object.values(fields)) input.addEventListener("change", update);
+  node.append(row, preview, ...(appointment.scan ? [wandingLabel] : []));
+  update();
+  return { node, read };
+}
+
+// Saves new times for a visit. Moving the lab portion moves its phlebotomy and Wet Lab times with it.
+async function saveVisitTimes(appointment, parts, changes = {}) {
+  await Store.saveAppointment(appointment, appointmentData(appointment, { ...parts, ...changes }));
+  const doc = staffingFor(appointment);
+  if (doc && doc.lab && appointment.lab && parts.lab) {
+    const delta = toMinutes(parts.lab.start) - toMinutes(appointment.lab.start);
+    if (delta) {
+      await Store.saveStaffing(doc.visitKey, {
+        ...withoutId(doc),
+        lab: { ...doc.lab, phlebotomyAt: shiftClock(doc.lab.phlebotomyAt, delta), wetLabStart: shiftClock(doc.lab.wetLabStart, delta) },
+      });
+    }
+  }
+  pingSync();
+  await refresh();
+}
+
+function freshVisit(iso, appointment) {
+  return visitsOn(iso).find((visit) => visitKey(visit) === visitKey(appointment)) || appointment;
+}
+
+// Reviewers: change an open slot's times before anyone books it.
+function openSlotTimesDialog(iso, appointment) {
+  const times = visitTimesEditor(appointment);
+  const body = [...visitHeading(iso, appointment), times.node];
+  if (appointment.booking === "rebooking") body.push(el("p", "notice", `A booking for this slot was cancelled${appointment.bookedByName ? ` by ${appointment.bookedByName}` : ""}. It's open to rebook.`));
+  openDialog("Open participant slot", body, [
+    dialogButton("Save times", "primary", async () => {
+      await saveVisitTimes(appointment, times.read());
+      return "Slot times saved.";
+    }),
+    dialogButton("Mark booked", "secondary", async () => {
+      await setBooking(appointment, "booked");
+      return "Marked booked. Confirm it to record the scan time.";
+    }),
+    switchButton("Staffing details", "secondary", () => openSlotDialog(iso, appointment, appointment.lab ? "lab" : "scan")),
+    confirmingButton(visitNumber(iso, appointment) ? `Cancel visit ${visitNumber(iso, appointment)}` : "Cancel this slot", "Click again to cancel it", "secondary danger", () => cancelAppointment(appointment)),
+    closeButton(),
+  ]);
+}
+
+// Reviewers: confirm a booking, recording the scan time and approving or changing any start time the booker asked for.
+function openConfirmDialog(iso, appointment) {
+  const times = visitTimesEditor(appointment, appointment.requestedStart || "");
+  const body = [...visitHeading(iso, appointment)];
+  body.push(el("p", "", `Booked by ${appointment.bookedByName || appointment.bookedBy}${appointment.bookedAt ? ` on ${formatIso(String(appointment.bookedAt).slice(0, 10))}` : ""}.`));
+  if (appointment.requestedStart) {
+    body.push(el("p", "notice", `${appointment.bookedByName || "The booker"} asked to start at ${formatTime(appointment.requestedStart)} instead. It's filled in below: keep it to approve, or change it.`));
+  }
+  body.push(el("h3", "", "Visit and scan times"), times.node, el("p", "muted", "Record the scan time you booked. The lab portion runs 2 hours from the start, or until the scan if that's sooner."));
+  openDialog("Confirm booking", body, [
+    dialogButton("Confirm booking", "primary", async () => {
+      await saveVisitTimes(appointment, times.read(), { confirmed: true, confirmedBy: me.email, confirmedAt: new Date().toISOString(), requestedStart: "" });
+      openConfirmedReminder(iso, freshVisit(iso, appointment));
+      return "";
+    }),
+    confirmingButton("Cancel booking", "Click again to cancel the booking", "secondary danger", async () => {
+      await setBooking(appointment, "rebooking");
+      return "Booking cancelled. The slot is open again.";
+    }),
+    closeButton(),
+  ]);
+}
+
+// Shown straight after confirming: participant details go on the lab's Google Calendar by hand, never on this site.
+function openConfirmedReminder(iso, appointment) {
+  openDialog("Booking confirmed", [
+    el("p", "", `${formatIsoWithDay(iso)} · ${partsText(appointment)}`),
+    el("p", "reminder-box", "Now add this appointment to the lab's appointment calendar in Google Calendar, with the participant ID and other study details. Participant information goes there only, never on this site."),
+    el("p", "muted", "Next, staff the visit. Approving the staffing sends the staff their calendar invites and emails automatically."),
+  ], [
+    switchButton("Staff this visit", "primary", () => openStaffingDialog(iso, freshVisit(iso, appointment))),
+    closeButton(),
+  ]);
+}
+
+// Reviewers: a confirmed visit, with its staffing.
+function openScheduledDialog(iso, appointment) {
+  const doc = staffingFor(appointment);
+  const body = [...visitHeading(iso, appointment), el("p", "", partsText(appointment))];
+  for (const note of unusualTimes(appointment)) body.push(el("p", "booking-unusual", `${SEE_TIME} ${note}`));
+  body.push(el("p", "muted", `Booked by ${appointment.bookedByName || appointment.bookedBy || "a reviewer"}${appointment.confirmedBy ? `, confirmed by ${nameFor(appointment.confirmedBy)}` : ""}.`));
+  body.push(staffingSummary(iso, appointment));
+  openDialog("Scheduled visit", body, [
+    switchButton(doc ? "Change staffing" : "Staff this visit", "primary", () => openStaffingDialog(iso, appointment)),
+    switchButton("Change times", "secondary", () => openEditScheduledDialog(iso, appointment)),
+    confirmingButton("Cancel visit", "Click again to cancel the visit", "secondary danger", () => cancelAppointment(appointment)),
+    closeButton(),
+  ]);
+}
+
+function openEditScheduledDialog(iso, appointment) {
+  const times = visitTimesEditor(appointment);
+  openDialog("Change visit times", [...visitHeading(iso, appointment), times.node, el("p", "muted", "Staff are told about changed times with the next update, if staff emails are on.")], [
+    dialogButton("Save times", "primary", async () => {
+      await saveVisitTimes(appointment, times.read());
+      return "Visit times saved.";
+    }),
+    switchButton("Back", "secondary", () => openScheduledDialog(iso, appointment)),
+    closeButton(),
+  ]);
+}
+
+// Bookers: book an open slot as it is, or ask for a different start time between 8:00 and 10:00 AM.
+function openBookDialog(iso, appointment) {
+  const start = minutesToTime(visitWindow(appointment).start);
+  const select = el("select");
+  const option = (value, text) => {
+    const node = el("option", "", text);
+    node.value = value;
+    return node;
+  };
+  select.append(option("", `As scheduled (${formatTime(start)})`), ...REQUESTABLE_STARTS.filter((time) => time !== start)
+    .map((time) => option(time, `Ask for ${formatTime(time)} (needs a lab manager's approval)`)));
+  openDialog("Book this slot", [
+    ...visitHeading(iso, appointment),
+    el("p", "", partsText(appointment)),
+    labeled("Start time", select),
+    el("p", "notice", "Don't enter participant information here. After you book, an email to the reviewers opens in your own USC email: add the Screener ID and send it."),
+  ], [
+    dialogButton("Mark booked", "primary", async () => {
+      const requested = select.value;
+      await setBooking(appointment, "booked", requested);
+      openEmailDraft(bookingEmailUrl(iso, appointment, requested));
+      return requested
+        ? `Booked, asking to start at ${formatTime(requested)}. An email to the reviewers has opened: add the Screener ID and send it.`
+        : "Booked. An email to the reviewers has opened: add the Screener ID and send it.";
+    }),
+    closeButton(),
+  ]);
+}
+
+// Bookers: a visit they booked.
+function openMyBookingDialog(iso, appointment) {
+  const status = visitStatus(appointment);
+  const body = [...visitHeading(iso, appointment), el("p", "", partsText(appointment)), el("p", "", status === "confirmed" ? "Confirmed by a lab manager." : "Booked, waiting for a lab manager to confirm it.")];
+  if (status === "booked" && appointment.requestedStart) body.push(el("p", "notice", `You asked to start at ${formatTime(appointment.requestedStart)}. A lab manager will approve or change it.`));
+  for (const note of unusualTimes(appointment)) body.push(el("p", "booking-unusual", `${SEE_TIME} ${note}`));
+  const actions = [];
+  if (status === "booked") actions.push(bookingEmailLink(iso, appointment));
+  actions.push(confirmingButton("Cancel booking", "Click again to cancel the booking", "secondary danger", async () => {
+    await setBooking(appointment, "rebooking");
+    return "Booking cancelled. The slot is open again, and the lab managers are emailed automatically.";
+  }), closeButton());
+  openDialog("Your booking", body, actions);
+}
+
+function openVisitInfoDialog(iso, appointment) {
+  const status = visitStatus(appointment);
+  openDialog(status === "open" ? "Open participant slot" : status === "booked" ? "Booked visit" : "Scheduled visit", [
+    ...visitHeading(iso, appointment),
+    el("p", "", partsText(appointment)),
+    ...unusualTimes(appointment).map((note) => el("p", "booking-unusual", `${SEE_TIME} ${note}`)),
+  ], [closeButton()]);
+}
+
 // --- Booking ---
 // Bookers see visits and whether they're booked, never who is staffing them. Participant details never go
 // through this site: bookers email them to reviewers from their own USC email instead.
 
-function bookableVisits() {
-  const through = defaultVisitsThrough(new Date());
-  const first = [dateToIso(startOfDay(new Date())), BOOKING_STARTS].sort()[1];
-  const list = [];
-  for (let iso = first; iso <= through; iso = shiftIso(iso, 1)) {
-    for (const appointment of visitsOn(iso)) list.push({ iso, appointment });
-  }
-  // Extra visits reviewers have added further ahead.
-  for (const appointment of appointments) {
-    if (!appointment.defaultFor && appointment.date > through) list.push({ iso: appointment.date, appointment });
-  }
-  return list.sort((a, b) => a.iso.localeCompare(b.iso) || visitWindow(a.appointment).start - visitWindow(b.appointment).start);
+// Every booking from today on, as the visits they're on.
+function bookedVisits() {
+  const today = dateToIso(startOfDay(new Date()));
+  const dates = [...new Set(appointments.filter((appointment) => appointment.booking && appointment.date >= today).map((appointment) => appointment.date))];
+  return dates.flatMap((iso) => visitsOn(iso).filter((appointment) => appointment.booking).map((appointment) => ({ iso, appointment })))
+    .sort((a, b) => a.iso.localeCompare(b.iso) || visitWindow(a.appointment).start - visitWindow(b.appointment).start);
 }
 
 const PUBLISHED_SITE = "https://dbelkind.github.io/lab-schedules/";
@@ -2222,12 +2529,12 @@ function visitLink(appointment) {
 // The booker's email to the reviewers, sent from their own USC account. The booker types the Screener ID in, so
 // participant information only ever travels by email and goes on the lab's own Google Calendar, never this site.
 // Cancelled bookings aren't emailed this way: the Apps Script emails lab managers about them automatically.
-function bookingEmailUrl(iso, appointment) {
+function bookingEmailUrl(iso, appointment, requestedStart = "") {
   const to = reviewerContacts.map((reviewer) => reviewer.email).join(",");
   const { subject, body } = bookingEmail({
     when: `${formatIsoWithDay(iso)}, ${visitTimesText(appointment)}`,
     parts: partsText(appointment),
-    seeTime: unusualTimes(appointment),
+    requestedStart: requestedStart ? formatTime(requestedStart) : "",
     link: visitLink(appointment),
   });
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -2235,7 +2542,7 @@ function bookingEmailUrl(iso, appointment) {
 
 function bookingEmailLink(iso, appointment) {
   const link = el("a", "secondary small button-link", "Email booking details to reviewers");
-  link.href = bookingEmailUrl(iso, appointment);
+  link.href = bookingEmailUrl(iso, appointment, appointment.requestedStart || "");
   return link;
 }
 
@@ -2257,95 +2564,109 @@ function setBookingStatus(text, isError) {
   status.classList.toggle("error", Boolean(isError));
 }
 
+const STATUS_TEXT = { open: "Open", booked: "Booked, waiting for confirmation", confirmed: "Confirmed" };
+
 function bookingCard(iso, appointment) {
-  const card = el("div", `booking-card booking-${appointment.booking || "open"}`);
+  const status = appointment.booking === "rebooking" ? "rebooking" : visitStatus(appointment);
+  const card = el("div", `booking-card booking-${status}`);
   const main = el("div", "booking-main");
   const number = visitNumber(iso, appointment);
   main.append(
-    el("strong", "", `${number ? `Visit ${number}: ` : ""}${visitTimesText(appointment)}`),
+    el("strong", "", `${formatIsoWithDay(iso)} · ${number ? `Visit ${number}, ` : ""}${visitTimesText(appointment)}`),
     el("div", "muted", `${partsText(appointment)}${visitPartsLabel(appointment) ? ` · ${visitPartsLabel(appointment)}` : ""}`),
   );
   for (const note of unusualTimes(appointment)) main.append(el("div", "booking-unusual", `${SEE_TIME} ${note}`));
-  main.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, bookingLabel(appointment)));
+  if (appointment.requestedStart && status === "booked") main.append(el("div", "booking-unusual", `Requested start: ${formatTime(appointment.requestedStart)} (needs approval)`));
+  main.append(el("span", `slot-chip chip-${status}`, status === "rebooking" ? "Booking cancelled, open to rebook" : STATUS_TEXT[status]));
+  if (appointment.bookedByName) main.append(el("div", "muted", `Booked by ${appointment.bookedByName}`));
   const actions = el("div", "booking-actions");
-  const act = (text, className, status, done) => {
-    const button = el("button", className, text);
-    button.type = "button";
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        await setBooking(appointment, status);
-        setBookingStatus(done);
-        if (status === "booked") openEmailDraft(bookingEmailUrl(iso, appointment));
-      } catch (error) {
-        setBookingStatus(friendlyError(error), true);
-      } finally {
-        button.disabled = false;
-      }
-    });
-    return button;
-  };
-  if (appointment.booking === "booked") {
-    actions.append(bookingEmailLink(iso, appointment),
-      act("Cancel booking", "secondary small", "rebooking", "Booking cancelled. The visit stays open so it can be rebooked, and the lab managers are emailed automatically."));
-  } else {
-    actions.append(act(appointment.booking === "rebooking" ? "Book again" : "Mark booked", "primary small", "booked",
-      "Visit booked. An email to the reviewers has opened: add the Screener ID and send it. If it didn't open, use Email booking details to reviewers."));
-  }
+  const open = el("button", "secondary small", isReviewer() && status === "booked" ? "Confirm…" : "Open");
+  open.type = "button";
+  open.addEventListener("click", () => openLabCalendarDialog(iso, appointment));
+  actions.append(open);
+  if (!isReviewer() && status === "booked") actions.append(bookingEmailLink(iso, appointment));
   card.append(main, actions);
   return card;
 }
 
+// Reviewers follow up bookings here; bookers see the ones they've made. Booking itself is on the Lab Calendar.
 function renderBookingPage() {
   if (!isBooker()) return;
-  for (const button of document.querySelectorAll("[data-booking-filter]")) {
-    button.setAttribute("aria-pressed", String(button.dataset.bookingFilter === bookingFilter));
-  }
-  const wanted = ({ appointment }) => bookingFilter === "all"
-    || (bookingFilter === "booked" ? appointment.booking === "booked" : appointment.booking !== "booked");
-  const visits = bookableVisits().filter(wanted);
-  const listEl = document.getElementById("booking-list");
-  if (!visits.length) {
-    listEl.replaceChildren(el("p", "muted", `No ${bookingFilter === "all" ? "" : `${bookingFilter} `}visits right now. Visits from ${formatIso(BOOKING_STARTS)} on are booked here, and a new day opens at 8:00 AM each morning, 60 days ahead.`));
-    return;
-  }
-  const nodes = [];
-  let day = "";
-  for (const { iso, appointment } of visits) {
-    if (iso !== day) {
-      day = iso;
-      nodes.push(el("h3", "booking-day", formatIsoWithDay(iso)));
-    }
-    nodes.push(bookingCard(iso, appointment));
-  }
-  listEl.replaceChildren(...nodes);
+  const all = bookedVisits();
+  const filters = isReviewer()
+    ? [["waiting", "Waiting for confirmation", (item) => visitStatus(item.appointment) === "booked"],
+      ["confirmed", "Confirmed", (item) => visitStatus(item.appointment) === "confirmed"],
+      ["cancelled", "Cancelled bookings", (item) => item.appointment.booking === "rebooking"]]
+    : [["mine", "My bookings", (item) => item.appointment.bookedBy === me.email]];
+  if (!filters.some(([key]) => key === bookingFilter)) bookingFilter = filters[0][0];
+  document.getElementById("booking-intro").textContent = isReviewer()
+    ? "Bookings waiting for you to confirm, and the ones already confirmed. Confirming records the scan time; then staff the visit."
+    : "The bookings you've made. Book participants into open slots on the Lab Calendar.";
+  document.getElementById("booking-filter").replaceChildren(...filters.map(([key, label, test]) => {
+    const button = el("button", "pill-tab");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(key === bookingFilter));
+    button.append(label, el("span", "pill-count", String(all.filter(test).length)));
+    button.addEventListener("click", () => {
+      bookingFilter = key;
+      setBookingStatus("");
+      renderBookingPage();
+    });
+    return button;
+  }));
+  const [, , test] = filters.find(([key]) => key === bookingFilter);
+  const shown = all.filter(test);
+  document.getElementById("booking-list").replaceChildren(...(shown.length
+    ? shown.map(({ iso, appointment }) => bookingCard(iso, appointment))
+    : [el("p", "muted empty-note", isReviewer() ? "Nothing here right now." : "You haven't booked anyone yet. Open slots are on the Lab Calendar.")]));
+}
+
+const VIEW_TEXT = {
+  appointments: ["Lab Calendar", ""],
+  mine: ["My calendar", "Each block is a time you can't be in the lab. Open time is when you're available. Click your own blocks to change them, or drag on empty space to add a time."],
+  unavailability: ["When lab members are unavailable", "Each block is a time someone can't be in the lab. Click anyone's blocks to change them, or drag on empty space to add a time."],
+  availability: ["When lab members are available", "Each block is a time someone has nothing on their schedule, between 8 AM and 6 PM. Filter by role, or turn people on and off below it. Click a block to see what they're trained in."],
+  staffing: ["Staffing", "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."],
+  checker: ["Availability Checker", "See who could work at any time, not only during visits. Pick a day and times, or test them as a visit to see whether it could be staffed."],
+};
+
+function appointmentsHint() {
+  const key = "Open participant slots are gray, booked visits are blue until a lab manager confirms them, and confirmed visits show their lab portion and scan.";
+  if (isReviewer()) return `${key} Click an open slot to change its times before it's booked, a booked visit to confirm it, or a confirmed one to staff it. Drag on empty space to add a visit.`;
+  if (isBooker()) return `${key} Click an open slot to book it, or one of your bookings to change it.`;
+  return key;
 }
 
 function setCalendarView(view) {
   calendarView = view;
-  for (const button of document.querySelectorAll("[data-view]")) {
-    button.setAttribute("aria-pressed", String(button.dataset.view === view));
-  }
-  const lab = isLabView();
-  const available = isAvailabilityView();
   const checker = isCheckerView();
   // The Availability Checker replaces the week with its own form.
   document.getElementById("calendar-body").hidden = checker;
   document.getElementById("availability-checker").hidden = !checker;
-  document.getElementById("calendar-scope").textContent = checker
-    ? "Availability Checker"
-    : lab ? "Participant visit staffing"
-      : available ? "When lab members are available" : isReviewer() ? "When lab members are unavailable" : "When you're unavailable";
-  document.getElementById("calendar-hint").textContent = checker
-    ? "See who could work at any time, not only during visits. Pick a day and times, or test them as a visit to see whether it could be staffed."
-    : available
-    ? "Each block is a time someone has nothing on their schedule, between 8 AM and 6 PM. Filter by role, or turn people on and off below it. Click a block to see what they're trained in."
-    : lab
-    ? "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."
-    : "Each block is a time someone can't be in the lab. Open time is when they're available. Click your own blocks to change them, or drag on empty space to add a time.";
+  const [scope, hint] = VIEW_TEXT[view] || VIEW_TEXT.appointments;
+  document.getElementById("calendar-scope").textContent = view === "mine" && enteringForOther() ? `${nameFor(targetEmail())}'s calendar` : scope;
+  document.getElementById("calendar-hint").textContent = view === "appointments" ? appointmentsHint() : hint;
   setCalendarStatus("");
   renderFilters();
   renderWeek();
+}
+
+// The week calendar is one block of the page, moved into whichever page shows it.
+function mountCalendar(homeId) {
+  const home = document.getElementById(homeId);
+  const module = document.getElementById("calendar-module");
+  if (module.parentNode !== home) home.append(module);
+}
+
+// Administrative Schedules: Team availability (unavailable or available times), Staffing, or the Availability Checker.
+function setAdminView(view) {
+  adminView = view;
+  for (const button of document.querySelectorAll("[data-admin]")) button.setAttribute("aria-selected", String(button.dataset.admin === view));
+  document.getElementById("team-toggle").hidden = view !== "team";
+  for (const button of document.querySelectorAll("[data-team]")) button.setAttribute("aria-pressed", String(button.dataset.team === teamView));
+  mountCalendar("admin-home");
+  setCalendarView(view === "team" ? teamView : view);
 }
 
 function renderMiniMonth() {
@@ -3445,7 +3766,7 @@ function friendlyError(error) {
 
 function updateSaveVisibility() {
   const needsReview = activeTab === "class" && reviewEl.hidden;
-  saveButton.hidden = needsReview || activeTab === "entries";
+  saveButton.hidden = needsReview || activeTab === "entries" || activeTab === "calendar";
   saveButton.textContent = activeTab === "ooo" && !enteringForOther() && ownTimeOffNeedsReview() ? "Send for review" : "Save";
 }
 
@@ -3462,6 +3783,10 @@ function showTab(tab) {
   }
   setStatus("");
   if (tab === "conflict" && !conflictRowsEl.children.length) addRow(conflictRowsEl);
+  if (tab === "calendar") {
+    mountCalendar("mine-home");
+    setCalendarView("mine");
+  }
   updateSaveVisibility();
 }
 
@@ -3537,7 +3862,8 @@ async function refresh() {
     Store.listAvailability(scope),
     Store.listTimeOff(scope),
     Store.listChangeRequests(scope),
-    isBooker() ? Store.listAppointments() : [],
+    // Everyone sees the Lab Calendar.
+    Store.listAppointments(),
     isReviewer() ? Store.listStaffing() : [],
     isBooker() && !isReviewer() ? Store.listReviewers() : [],
     Store.getProfile(me.email),
@@ -3605,6 +3931,7 @@ function renderActingFor() {
 function setActingFor(email) {
   actingFor = email === me.email ? null : email;
   renderNoClasses();
+  if (isMineView()) setCalendarView("mine");
   resetForm();
   renderActingFor();
   renderMyEntries();
@@ -3619,7 +3946,17 @@ function showPage(page) {
   document.getElementById("page-booking").hidden = page !== "booking";
   document.getElementById("page-profile").hidden = page !== "profile";
   document.getElementById("page-directory").hidden = page !== "directory";
+  document.getElementById("page-admin").hidden = page !== "admin";
   if (page === "profile") fillProfileForm();
+  if (page === "calendar") {
+    mountCalendar("calendar-home");
+    setCalendarView("appointments");
+  } else if (page === "admin") {
+    setAdminView(adminView);
+  } else if (page === "update" && activeTab === "calendar") {
+    mountCalendar("mine-home");
+    setCalendarView("mine");
+  }
   for (const link of document.querySelectorAll(".page-link, .menu-item[data-page]")) {
     if (link.dataset.page === page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -3664,14 +4001,17 @@ async function handleAuthChange(user) {
   calendarSettings = { academic: null, holidays: null };
   onboarding = false;
   directoryTab = "all";
+  directoryView = "directory";
   availabilityRoles = new Set();
-  bookingFilter = "open";
+  bookingFilter = "waiting";
   blocks = [];
   actingFor = null;
   shownMembers = new Set();
   memberPickerOpen = false;
   hidden.clear();
-  calendarView = "unavailability";
+  calendarView = "appointments";
+  adminView = "staffing";
+  teamView = "unavailability";
   messagesEl.replaceChildren();
   if (academicError) showMessage(academicError);
   if (!user) {
@@ -3690,7 +4030,7 @@ async function handleAuthChange(user) {
     me = member;
     document.getElementById("manage-link").hidden = !isReviewer();
     document.getElementById("booking-link").hidden = !isBooker();
-    document.getElementById("view-switch").hidden = !isReviewer();
+    document.getElementById("admin-link").hidden = !isReviewer();
     document.getElementById("ooo-help").textContent = ownTimeOffNeedsReview()
       ? "Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it."
       : "Add time you won't be in the lab, either whole days or part of a single day. It's saved straight away, and reviewers are emailed about it.";
@@ -3701,7 +4041,9 @@ async function handleAuthChange(user) {
     showScreen("app");
     await refresh();
     watchPendingRequests();
-    setCalendarView(isReviewer() ? "lab" : "unavailability");
+    bookingFilter = isReviewer() ? "waiting" : "mine";
+    mountCalendar("calendar-home");
+    setCalendarView("appointments");
     const hasPending = isReviewer() &&
       (timeOff.some((request) => request.status === "pending") || changeRequests.some((request) => request.status === "pending"));
     showTab("class");
@@ -3768,8 +4110,20 @@ function wireUpEvents() {
     resetForm();
     showTab("entries");
   });
-  for (const button of document.querySelectorAll("[data-view]")) {
-    button.addEventListener("click", () => setCalendarView(button.dataset.view));
+  for (const button of document.querySelectorAll("[data-directory-view]")) {
+    button.addEventListener("click", () => {
+      directoryView = button.dataset.directoryView;
+      renderDirectory();
+    });
+  }
+  for (const button of document.querySelectorAll("[data-admin]")) {
+    button.addEventListener("click", () => setAdminView(button.dataset.admin));
+  }
+  for (const button of document.querySelectorAll("[data-team]")) {
+    button.addEventListener("click", () => {
+      teamView = button.dataset.team;
+      setAdminView("team");
+    });
   }
   for (const button of document.querySelectorAll(".manage-tab")) {
     button.addEventListener("click", () => showManageTab(button.dataset.manage));
@@ -3789,13 +4143,6 @@ function wireUpEvents() {
   });
   for (const id of ["check-date", "check-start", "check-end", "check-kind"]) {
     document.getElementById(id).addEventListener("change", renderAvailabilityCheck);
-  }
-  for (const button of document.querySelectorAll("[data-booking-filter]")) {
-    button.addEventListener("click", () => {
-      bookingFilter = button.dataset.bookingFilter;
-      setBookingStatus("");
-      renderBookingPage();
-    });
   }
   document.getElementById("dialog-close").addEventListener("click", () => dialogEl.close());
   document.addEventListener("click", closePopups);

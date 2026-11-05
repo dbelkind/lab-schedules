@@ -1136,3 +1136,69 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 .no-classes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 14px; font-size: 14px; }
 .no-classes.marked { padding: 8px 12px; border-radius: var(--radius-small); background: var(--accent-soft); color: #0b5a54; }
+
+/* Lab Calendar: open slots, booked visits and scheduled visits */
+.visit-block {
+  position: absolute;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid #94a3b8;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.visit-block strong { display: block; font-weight: 700; }
+.visit-open { border-style: dashed; border-left-style: solid; color: #475569; }
+.visit-booked { border-color: #93c5fd; border-left-color: #2563eb; background: #eff6ff; color: #1e3a8a; }
+.visit-booked strong { letter-spacing: 0.02em; }
+.visit-confirmed { border-color: #99d5cc; border-left-color: var(--accent); background: var(--accent-soft); color: #0b4f49; }
+.visit-rebooking { border-left-color: #ea580c; }
+.visit-block:focus-visible { outline: none; box-shadow: var(--focus); }
+.chip-many { background: var(--pink-100); color: var(--pink-700); }
+.chip-confirmed { background: #dcfce7; color: #166534; }
+.reminder-box { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--pink-200); border-left: 4px solid var(--pink-700); border-radius: var(--radius-small); background: var(--pink-50); font-weight: 600; }
+.visit-times-preview { margin: 0 0 8px; }
+
+/* Administrative Schedules */
+#page-admin { display: grid; gap: 14px; }
+.admin-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; }
+.admin-head h2 { margin: 0; font-size: 24px; }
+.admin-head .pill-tabs { margin: 0; }
+
+/* Role filter groups */
+.role-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.role-group { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); }
+.role-group.error { color: var(--error-text); font-size: 13px; }
+.role-tree { margin: 4px 0 0 7px; padding: 0 0 0 12px; border-left: 2px solid var(--pink-200); }
+
+/* Directory: one table, with the roles as sheet tabs along its bottom */
+.sheet .table-scroll { margin-bottom: 0; border-bottom-left-radius: 0; }
+.sheet-empty { margin: 0; padding: 18px 16px; border: 1px solid var(--line); border-radius: var(--radius-small) var(--radius-small) var(--radius-small) 0; background: var(--surface); }
+.sheet-tabs { display: flex; flex-wrap: wrap; gap: 3px; margin: -1px 0 0; padding: 0; }
+.sheet-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px 8px;
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.sheet-tab:hover { background: var(--pink-50); color: var(--pink-700); }
+.sheet-tab[aria-selected="true"] { border-top-color: var(--surface); background: var(--surface); color: var(--accent); box-shadow: inset 0 -3px 0 var(--pink-300); }
+.sheet-tab[aria-selected="true"] .pill-count { background: var(--accent-soft); color: var(--accent); }
+
+/* A table that fits the page, wrapping long text instead of scrolling sideways */
+.data-table.fit { table-layout: fixed; }
+.data-table.fit td { overflow-wrap: anywhere; }
+.data-table.fit .sort-button { white-space: normal; }
+.data-table.fit .person-cell { min-width: 0; }
+.data-table.fit .title-badge { white-space: normal; }

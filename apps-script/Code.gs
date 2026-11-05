@@ -1,4 +1,4 @@
-// Connects the Lifespan Cognition Lab Member Portal to Google Calendar and email. It keeps three calendars for lab managers:
+// Connects the Lifespan Cognition Lab Researcher Portal to Google Calendar and email. It keeps three calendars for lab managers:
 // - "LCL Visits": each participant visit, colored by its booking (gray open, blue booked, orange waiting to be
 //   rebooked), with who's available for each part. Updated every 10 minutes, and straight away when the site pings it.
 // - "LCL Confirmed Visits": each staffed visit, with who's doing what. Updated every 10 minutes.
@@ -33,6 +33,8 @@ const CONFIG = {
   scheduleSemesters: ["spring", "fall"],
   // Where "Received this email by mistake?" at the bottom of every email goes.
   labManagerEmail: "dbelkind@usc.edu",
+  // Where scans are booked, linked from the 8:30 AM scan booking reminder.
+  scanBookingUrl: "https://dni.usc.edu/dashboard.php",
   // Where sendTestEmails sends its samples.
   testEmailsTo: "dbelkind@usc.edu",
   // The site's pings run at most this often, since anyone with the web app's link could call it.
@@ -40,17 +42,18 @@ const CONFIG = {
 };
 
 // Google Calendar's event colors, which look the same to everyone the calendar is shared with.
-// LCL Visits is colored by booking: 8 is gray (Graphite), 9 is blue (Blueberry) and 6 is orange (Tangerine).
-// Visits from before booking moved to the website keep the calendar's own color.
-const BOOKING_COLORS = { open: "8", booked: "9", rebooking: "6" };
-const BOOKING_TITLES = { open: "Open", booked: "Booked", rebooking: "Rebooking" };
+// LCL Visits is colored by booking: 8 is gray (Graphite) for open, 9 is blue (Blueberry) for booked and waiting to be
+// confirmed, 10 is green (Basil) for confirmed, and 6 is orange (Tangerine) for a cancelled booking waiting to be
+// rebooked. Visits from before booking moved to the website keep the calendar's own color.
+const BOOKING_COLORS = { open: "8", booked: "9", confirmed: "10", rebooking: "6" };
+const BOOKING_TITLES = { open: "Open", booked: "Booked", confirmed: "Confirmed", rebooking: "Rebooking" };
 const TITLE_MARKS = { ready: "✅", tight: "🟡", problem: "⚠️" };
 
 const RULE_NAMES = [
   "appointmentsOn", "evaluateVisitSlot", "evaluateManagers", "managerCandidates", "normalizeSkills", "isOffHours",
   "SLOT_TITLES", "staffingState", "personLabel", "visitKey", "visitWindow", "unusualTimes", "visitPartsLabel",
   "defaultVisitsThrough", "assignmentLines", "checkAssignment", "BOOKING_STARTS", "clockTime", "wantsEmail", "SEE_TIME",
-  "staffRoles", "bookingEmail", "birthdayMonthDay",
+  "staffRoles", "bookingEmail", "birthdayMonthDay", "visitStatus",
 ];
 // Older trigger names are listed too, so running setUp again clears them away.
 const TRIGGERS = ["syncStaffing", "hourlySync", "checkRequests", "frequentChecks", "dailyVisits"];
@@ -114,7 +117,7 @@ function hourlySync() {
 function syncVisits(site, staffing, today) {
   const wanted = buildVisitEvents(site.rules, site.data, site.appointments, site.holidays, today, staffing);
   const calendarId = calendarIdFor("calendarId", CONFIG.visitsCalendarName,
-    "Participant visits: gray when open, blue when booked, orange when a booking was cancelled and it's open to rebook. Says who's available for each part. From the Lifespan Cognition Lab Member Portal.");
+    "Participant visits: gray when open, blue when booked, orange when a booking was cancelled and it's open to rebook. Says who's available for each part. From the Lifespan Cognition Lab Researcher Portal.");
   const changes = writeCalendar(calendarId, wanted, today, CONFIG.daysAhead + 1);
   console.log(`LCL Visits synced: ${wanted.length} visits, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
 }
@@ -288,7 +291,7 @@ function requestsEmail(requests, nameOf) {
       ? `Lab schedule: ${nameOf(requests[0].owner)} sent a request to review`
       : `Lab schedule: ${requests.length} new requests to review`,
     lines: [
-      requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Member Portal:" : "New requests are waiting for review on the Lifespan Cognition Lab Member Portal:",
+      requests.length === 1 ? "A new request is waiting for review on the Lifespan Cognition Lab Researcher Portal:" : "New requests are waiting for review on the Lifespan Cognition Lab Researcher Portal:",
       "",
       ...requests.map((request) => `• ${bold(nameOf(request.owner))}: ${request.text}`),
       "",
@@ -373,7 +376,7 @@ function reviewResultEmail(request, nameOf) {
       `Your ${what}${detail} was ${decision} by ${bold(nameOf(request.reviewedBy))}.`,
       ...(request.reviewNote ? ["", `${bold("Their note:")} ${request.reviewNote}`] : []),
       "",
-      approved ? "It's on your calendar now." : "If you have questions, ask a lab manager. You can send a new request any time.",
+      approved ? "It's on your calendar now." : "If you have questions, ask the lab manager. You can send a new request any time.",
       "",
       `See your schedule: ${CONFIG.siteUrl}`,
     ],
@@ -476,7 +479,9 @@ function scanReminderEmail(rules, iso, visit) {
       "",
       `Please ${bold("book the scan")} for ${dateMark(`${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}`)}.`,
       "",
-      `See it here: ${CONFIG.siteUrl}`,
+      `Book it here: ${CONFIG.scanBookingUrl}`,
+      "",
+      `If you get a different time than ${dateMark(`${emailTime(visit.scan.start)} – ${emailTime(visit.scan.end)}`)}, ${bold(underline("change the slot's scan time"))} on the Lab Calendar before anyone books it: ${CONFIG.siteUrl}#visit=${rules.visitKey(visit)}`,
     ],
   };
 }
@@ -557,7 +562,7 @@ function scheduleReminderEmail(name, semester, greeting, reminder) {
       "",
       greeting,
       "",
-      `${reminder ? "Just a reminder: please" : "Please"} ${bold(`add your class schedule for ${semester.name}`)} on the lab's Member Portal, so we know when you can work in the lab. Classes start ${dateMark(emailDateWithDay(semester.classesBegin))}.`,
+      `${reminder ? "Just a reminder: please" : "Please"} ${bold(`add your class schedule for ${semester.name}`)} on the lab's Researcher Portal, so we know when you can work in the lab. Classes start ${dateMark(emailDateWithDay(semester.classesBegin))}.`,
       "",
       `Go to ${bold("Schedules → Update your Availability → Class schedule")}, choose ${semester.name}, and upload a screenshot or PDF of your schedule, or enter the times by hand: ${CONFIG.siteUrl}`,
       "",
@@ -576,7 +581,7 @@ function finalsEmail(name, semester, finals, reminder) {
       "",
       "Finals are almost here. Good luck! 🍀",
       "",
-      `Final exams run ${dateMark(`${emailDateWithDay(finals.from)} – ${emailDateWithDay(finals.to)}`)}. Your regular class times don't apply then, so please ${bold("add the times of your finals")} on the lab's Member Portal, so nobody schedules you during an exam.`,
+      `Final exams run ${dateMark(`${emailDateWithDay(finals.from)} – ${emailDateWithDay(finals.to)}`)}. Your regular class times don't apply then, so please ${bold("add the times of your finals")} on the lab's Researcher Portal, so nobody schedules you during an exam.`,
       "",
       `Go to ${bold("Schedules → Update your Availability → Request time off")} and add each exam for part of a day, or drag across its time on the Lab Calendar and choose ${bold("Doesn't repeat")}: ${CONFIG.siteUrl}`,
       "",
@@ -668,7 +673,7 @@ function calendarDataEmail(needs) {
   return {
     subject: "Lab schedule: please add the next USC calendar dates",
     lines: [
-      `The USC dates on the lab's Member Portal are ${bold(underline("running out"))}:`,
+      `The USC dates on the lab's Researcher Portal are ${bold(underline("running out"))}:`,
       "",
       ...needs.map((need) => `• ${need}`),
       "",
@@ -774,7 +779,7 @@ function buildCelebrationEvents(profiles, nameOf, today) {
   return celebrationsBetween(profiles, nameOf, todayIso, addDaysIso(todayIso, 364)).map((item) => ({
     key: `${item.kind}:${item.email}:${item.iso}`,
     title: celebrationTitle(item),
-    description: [...favoritesLines(item.profile), "", `From the Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}`].join("\n"),
+    description: [...favoritesLines(item.profile), "", `From the Lifespan Cognition Lab Researcher Portal: ${CONFIG.siteUrl}`].join("\n"),
     start: dateAt(item.iso, "00:00"),
     end: dateAt(addDaysIso(item.iso, 1), "00:00"),
     allDay: item.iso,
@@ -923,7 +928,6 @@ function unusualLines(rules, appointment, kind) {
   return notes.length ? [`${rules.SEE_TIME} These aren't the usual times:`, ...notes.map((note) => `• ${note}`), ""] : [];
 }
 
-const BOOKING_TEXT = { booked: "Booked", rebooking: "Booking cancelled, open to rebook" };
 
 function partLines(rules, iso, appointment, kind, result) {
   const state = rules.staffingState(result);
@@ -968,16 +972,20 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
       const managerResult = { problems: managers.problems, warnings: managers.warnings, flags: managers.flags, tight: false };
       const states = [...parts.map((part) => rules.staffingState(part.result)), rules.staffingState(managerResult)];
       const state = states.includes("problem") ? "problem" : states.includes("tight") ? "tight" : "ready";
-      const booking = appointment.booking || (iso >= rules.BOOKING_STARTS ? "open" : "");
+      const status = rules.visitStatus(appointment);
+      const booking = appointment.booking === "rebooking" ? "rebooking"
+        : status !== "open" ? status : iso >= rules.BOOKING_STARTS ? "open" : "";
       const doc = staffing.find((item) => item.visitKey === key);
       const check = doc ? rules.checkAssignment(iso, appointment, doc, data) : null;
       const tail = [...new Set([...parts.flatMap((part) => reasonsFor(rules, part.result)), ...reasonsFor(rules, managerResult)])];
       if (doc) tail.push(check.issues.length ? "staffing conflict" : "staffed");
+      if (visits.length > 1) tail.push(`👥 ${visits.length} participants`);
       const seeTime = rules.unusualTimes(appointment).length > 0;
       const partsLabel = rules.visitPartsLabel(appointment);
 
       const lines = [...unusualLines(rules, appointment), `Whole visit: ${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}${partsLabel ? ` (${partsLabel})` : ""}`];
-      if (booking) lines.push(`Booking: ${BOOKING_TEXT[appointment.booking] || "Open"}${appointment.bookedByName ? ` (${appointment.bookedByName})` : ""}`);
+      if (booking) lines.push(`Booking: ${BOOKING_TITLES[booking]}${appointment.bookedByName ? ` (${appointment.bookedByName})` : ""}${appointment.requestedStart && status === "booked" ? `, asked to start at ${emailTime(appointment.requestedStart)}` : ""}`);
+      if (visits.length > 1) lines.push(`👥 ${visits.length} participants are scheduled this day.`);
       for (const part of parts) lines.push("", ...partLines(rules, iso, appointment, part.kind, part.result));
       lines.push("", `Lab manager: ${managers.problems.length ? `${TITLE_MARKS.problem} ${managers.problems.join("; ")}` : managers.warnings.length ? `${TITLE_MARKS.tight} ${managers.warnings.join("; ")}` : `${TITLE_MARKS.ready} covered`}`,
         `Lab Managers Available: ${managers.group.people.map(rules.personLabel).join(", ") || "No one"}`, ...managers.notes.map((note) => `*${note}`));
@@ -1007,14 +1015,19 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
   const events = [];
   const todayIso = isoOf(today);
   const nameOf = (email) => (data.members.find((member) => member.email === email) || {}).name || email;
-  for (const doc of staffing) {
-    if (doc.date < todayIso) continue;
+  // Confirmed visits, whether staffed yet or not, and any staffed visit (such as fall visits booked the old way).
+  const wanted = new Map();
+  for (const appointment of appointments) {
+    if (appointment.date >= todayIso && rules.visitStatus(appointment) === "confirmed") wanted.set(rules.visitKey(appointment), { date: appointment.date, visitKey: rules.visitKey(appointment) });
+  }
+  for (const doc of staffing) if (doc.date >= todayIso) wanted.set(doc.visitKey, doc);
+  for (const doc of wanted.values()) {
     const visits = visitsOn(rules, doc.date, appointments, holidays);
     const index = visits.findIndex((appointment) => rules.visitKey(appointment) === doc.visitKey);
     // A cancelled visit isn't listed, so its events are removed.
     if (index === -1) continue;
     const appointment = visits[index];
-    const number = visits.length > 1 ? ` (visit ${index + 1} of ${visits.length} that day)` : "";
+    const number = visits.length > 1 ? ` (👥 visit ${index + 1} of ${visits.length} that day)` : "";
     // The visit event is flagged for the lab portion's times (or the scan's, for a scan-only visit), and the scan
     // event for the scan's, so a shorter scan doesn't flag the lab staff's invite.
     const visitPart = appointment.lab ? "lab" : "scan";
@@ -1030,7 +1043,8 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
     const prefixFor = (part) => (rules.unusualTimes(appointment, part).length ? `${rules.SEE_TIME} ` : "");
 
     const visitPeople = [...new Set([lab.dryLab, lab.phlebotomy, lab.wetLab, ...(doc.managers || [])].filter(Boolean))];
-    if (visitPeople.length && (appointment.lab || (doc.managers || []).length)) {
+    const unstaffed = ["Not staffed yet."];
+    if (appointment.lab || visitPeople.length) {
       events.push({
         key: `${doc.visitKey}:visit`,
         title: `${prefixFor(visitPart)}Participant Visit${number}`,
@@ -1040,12 +1054,12 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
           ...parts,
           "",
           "Staff:",
-          ...[...assigned.lab, ...assigned.managers].map((line) => `• ${line}`),
+          ...([...assigned.lab, ...assigned.managers].map((line) => `• ${line}`).concat(visitPeople.length ? [] : unstaffed)),
           "",
           "Lab staff are only needed for their own times above and don't need to come back after the scan; a lab manager finishes the visit.",
           ...(appointment.scan ? ["Scanners have a separate invite for the scan."] : []),
           "",
-          `Staffing on the Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}#visit=${doc.visitKey}`,
+          `Staffing on the Lifespan Cognition Lab Researcher Portal: ${CONFIG.siteUrl}#visit=${doc.visitKey}`,
         ].join("\n"),
         start: dateAtMinutes(doc.date, window.start),
         end: dateAtMinutes(doc.date, window.end),
@@ -1054,7 +1068,7 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
     }
 
     const scanPeople = [...new Set([scan.lead, scan.support, scan.wanding].filter(Boolean))];
-    if (appointment.scan && scanPeople.length) {
+    if (appointment.scan) {
       events.push({
         key: `${doc.visitKey}:scan`,
         title: `${prefixFor("scan")}Participant Visit - Scan${number}`,
@@ -1064,10 +1078,10 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
           `Whole visit: ${range(window.start, window.end)}`,
           "",
           "Staff:",
-          ...assigned.scan.map((line) => `• ${line}`),
+          ...(scanPeople.length ? assigned.scan.map((line) => `• ${line}`) : unstaffed),
           ...(appointment.scan.wandingRequired === false ? ["", "Wanding/taping isn't required for this visit."] : []),
           "",
-          `Lifespan Cognition Lab Member Portal: ${CONFIG.siteUrl}`,
+          `Lifespan Cognition Lab Researcher Portal: ${CONFIG.siteUrl}`,
         ].join("\n"),
         start: dateAt(doc.date, appointment.scan.start),
         end: dateAt(doc.date, appointment.scan.end),
@@ -1084,7 +1098,7 @@ function syncConfirmed(site = loadSite(), staffing = listCollection("staffing"),
   const wanted = buildConfirmedEvents(site.rules, site.data, site.appointments, site.holidays, staffing, today)
     .map((event) => (CONFIG.inviteStaff ? event : { ...event, attendees: [] }));
   const calendarId = calendarIdFor("confirmedCalendarId", CONFIG.confirmedCalendarName,
-    "Staffed participant visits, from the Lifespan Cognition Lab Member Portal. Filled in automatically every 10 minutes.");
+    "Staffed participant visits, from the Lifespan Cognition Lab Researcher Portal. Filled in automatically every 10 minutes.");
   const changes = writeCalendar(calendarId, wanted, today, 120);
   if (changes.created || changes.updated || changes.deleted) {
     console.log(`Confirmed Visits synced: ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
@@ -1115,11 +1129,12 @@ function staffSnapshot(rules, appointments, holidays, staffing, today) {
     const seeTime = {};
     for (const [email, theirs] of Object.entries(parts)) {
       seeTime[email] = theirs.has("visit") ? rules.unusualTimes(appointment)
-        : ["lab", "scan"].filter((part) => theirs.has(part)).flatMap((part) => rules.unusualTimes(appointment, part));
+        : [...new Set(["lab", "scan"].filter((part) => theirs.has(part)).flatMap((part) => rules.unusualTimes(appointment, part)))];
     }
     snapshot[doc.visitKey] = {
       date: doc.date,
       visit: `${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}`,
+      participants: visitsOn(rules, doc.date, appointments, holidays).length,
       seeTime,
       people,
     };
@@ -1178,12 +1193,13 @@ function staffEmail(rules, name, changes) {
       lines.push(`The participant visit on ${date} (${change.visit.visit}) has been ${bold(underline("cancelled"))}. You were down for: ${change.roles.join("; ")}.`);
     }
     const current = change.type === "assigned" || change.type === "changed";
+    if (current && change.visit.participants > 1) lines.push(`👥 ${bold(`${change.visit.participants} participants`)} are scheduled that day, so check which visit is yours.`);
     if (current && (change.seeTime || []).length) {
       lines.push(`${highlight(bold(rules.SEE_TIME))} These ${bold("aren't the usual times")}, so please check yours:`, ...change.seeTime.map((note) => `• ${bold(note)}`));
     }
     lines.push("");
   }
-  lines.push("Your Google Calendar has been updated to match. Questions? Ask a lab manager.");
+  lines.push("Your Google Calendar has been updated to match. Questions? Ask the lab manager.");
   const first = changes[0];
   const seeTime = changes.some((change) => (change.type === "assigned" || change.type === "changed") && (change.seeTime || []).length);
   const subject = changes.length === 1 ? STAFF_SUBJECTS[first.type](emailDateWithDay(first.visit.date)) : `Lab visits: ${changes.length} updates for you`;
@@ -1232,8 +1248,9 @@ function sendTestEmails() {
   const toReviewers = ({ subject, lines }) => send("lab managers", { subject, lines: reviewerLines(reviewers, lines), footer: [EMAIL_FOOTER] });
   const nameOf = (email) => ({ "jordan@usc.edu": "Jordan", "taylor@usc.edu": "Taylor", "alex@usc.edu": "Alex" }[email] || email);
   const profile = { birthday: "12-10", graduation: "2027-05", color: "Teal", dessert: "Tiramisu", dietary: "Tree nut allergy" };
-  const usual = { lab: { start: "09:00", end: "11:00" }, scan: { start: "11:00", end: "13:00", wandingRequired: true } };
-  const early = { lab: { start: "09:00", end: "10:00" }, scan: { start: "10:00", end: "12:00", wandingRequired: true } };
+  const usual = { defaultFor: "2027-01-12", lab: { start: "09:00", end: "11:00" }, scan: { start: "11:00", end: "13:00", wandingRequired: true } };
+  // A booked visit starting at 9:30 with a 90-minute scan, to show the time alerts.
+  const late = { lab: { start: "09:30", end: "11:30" }, scan: { start: "11:30", end: "13:00", wandingRequired: true }, booking: "booked", confirmed: true };
   const spring = { id: "spring-2027", name: "Spring 2027", classesBegin: "2027-01-11", classesEnd: "2027-04-30" };
 
   toReviewers(requestsEmail([
@@ -1257,19 +1274,19 @@ function sendTestEmails() {
 
   const booker = rules.bookingEmail({
     when: "Tue, Jan 12, 2027, 9:00 AM – 1:00 PM",
-    parts: "Lab portion 9:00 AM – 10:00 AM · Scan 10:00 AM – 12:00 PM",
-    seeTime: rules.unusualTimes(early),
+    parts: "Lab portion 9:00 AM – 11:00 AM · Scan 11:00 AM – 1:00 PM",
+    requestedStart: "9:30 AM",
     link: `${CONFIG.siteUrl}#visit=default-2027-01-12`,
   });
   send("reviewers from a booker (the site drafts it in the booker's own email, as plain text; they fill in the Screener ID)", { subject: booker.subject, lines: booker.body.split("\n") });
 
-  const visit = { date: "2027-01-12", visit: "9:00 AM – 1:00 PM", people: {} };
-  const roles = ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:30 AM–11:30 AM"];
-  // Lab staff only hear about the lab portion's unusual times.
-  const seeTime = rules.unusualTimes(early, "lab");
+  const visit = { date: "2027-01-12", visit: "9:30 AM – 1:30 PM", participants: 2, people: {} };
+  const roles = ["Phlebotomy, 9:30 AM–10:00 AM", "Wet Lab, 10:00 AM–12:00 PM"];
+  // Lab staff hear about the start time, but not the shorter scan.
+  const seeTime = rules.unusualTimes(late, "lab");
   const staffSample = (changes) => send("staff (once staff emails are switched on)", staffEmail(rules, "Jordan", changes));
   staffSample([{ type: "assigned", visit, roles, seeTime }]);
-  staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:00 AM–9:30 AM", "Wet Lab, 9:45 AM–11:45 AM"], was: roles, oldVisit: visit, seeTime }]);
+  staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:30 AM–10:00 AM", "Wet Lab, 10:15 AM–12:15 PM"], was: roles, oldVisit: visit, seeTime }]);
   staffSample([{ type: "removed", visit, roles }]);
   staffSample([{ type: "cancelled", visit, roles }]);
   staffSample([{ type: "assigned", visit, roles, seeTime }, { type: "cancelled", visit: { ...visit, date: "2027-01-14" }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);

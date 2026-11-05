@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lifespan Cognition Lab - Member Portal</title>
+  <title>Lifespan Cognition Lab - Researcher Portal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=22">
+  <link rel="stylesheet" href="style.css?v=24">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -16,7 +16,7 @@
       <h1 class="brand">
         <a id="home-link" class="brand-link" href="./" title="Go to the calendar">
           <img class="brand-mark" src="assets/logo-mark.png" alt="" width="50" height="40">
-          <span class="brand-title">Lifespan Cognition Lab - Member Portal</span>
+          <span class="brand-title">Lifespan Cognition Lab - Researcher Portal</span>
         </a>
       </h1>
       <nav id="page-nav" class="page-nav" aria-label="Pages" hidden>
@@ -30,6 +30,7 @@
             <button id="booking-link" type="button" class="menu-item" role="menuitem" data-page="booking" hidden>Booking</button>
           </div>
         </div>
+        <button id="admin-link" type="button" class="page-link" data-page="admin" hidden>Administrative Schedules</button>
         <button type="button" class="page-link" data-page="directory">Lab Directory</button>
         <div id="manage-link" class="nav-menu" hidden>
           <button id="manage-button" type="button" class="page-link nav-menu-button has-badge" aria-haspopup="menu" aria-expanded="false" aria-controls="manage-menu">
@@ -76,16 +77,14 @@
 
     <div id="app-screen" hidden>
     <section id="page-calendar">
+    <div id="calendar-home">
+    <!-- The one week calendar, moved into whichever page shows it: the Lab Calendar, My calendar under Update your
+         Availability, or Administrative Schedules. -->
+    <div id="calendar-module">
     <div class="calendar-heading">
       <div>
         <h2 id="calendar-scope" class="calendar-scope"></h2>
         <p id="calendar-hint" class="muted calendar-hint"></p>
-      </div>
-      <div id="view-switch" class="segmented" role="group" aria-label="Calendar view" hidden>
-        <button type="button" data-view="unavailability" aria-pressed="true">Unavailability</button>
-        <button type="button" data-view="availability" aria-pressed="false">Availability</button>
-        <button type="button" data-view="lab" aria-pressed="false">Lab Events</button>
-        <button type="button" data-view="checker" aria-pressed="false">Availability Checker</button>
       </div>
     </div>
 
@@ -143,6 +142,24 @@
       </div>
       <div id="check-results"></div>
     </div>
+    </div>
+    </div>
+    </section>
+
+    <section id="page-admin" hidden>
+      <div class="admin-head">
+        <h2>Administrative Schedules</h2>
+        <div id="admin-tabs" class="pill-tabs" role="tablist" aria-label="Administrative schedules">
+          <button type="button" class="pill-tab" role="tab" data-admin="team" aria-selected="false">Team availability</button>
+          <button type="button" class="pill-tab" role="tab" data-admin="staffing" aria-selected="true">Staffing</button>
+          <button type="button" class="pill-tab" role="tab" data-admin="checker" aria-selected="false">Availability Checker</button>
+        </div>
+        <div id="team-toggle" class="segmented" role="group" aria-label="Show" hidden>
+          <button type="button" data-team="unavailability" aria-pressed="true">Unavailable times</button>
+          <button type="button" data-team="availability" aria-pressed="false">Available times</button>
+        </div>
+      </div>
+      <div id="admin-home"></div>
     </section>
 
     <section id="page-update" class="upload" hidden>
@@ -166,6 +183,7 @@
         <button type="button" class="tab" role="tab" data-tab="conflict" aria-selected="false">Standing conflict</button>
         <button type="button" class="tab" role="tab" data-tab="ooo" aria-selected="false">Request time off</button>
         <button type="button" class="tab" role="tab" data-tab="entries" aria-selected="false">My availability</button>
+        <button type="button" class="tab" role="tab" data-tab="calendar" aria-selected="false">My calendar</button>
       </div>
 
       <div id="panel-class">
@@ -248,6 +266,10 @@
         <div id="my-entries"></div>
       </div>
 
+      <div id="panel-calendar" hidden>
+        <div id="mine-home"></div>
+      </div>
+
       <p id="upload-status" class="status" role="status"></p>
 
       <button id="save" type="button" class="primary">Save</button>
@@ -303,29 +325,25 @@
     <section id="page-directory" class="upload wide" hidden>
       <div class="directory-hero">
         <div>
-          <h2>Lab Directory</h2>
-          <p class="muted">Everyone in the lab, with their role, email and phone number. Change your own under My Profile in the menu at the top right.</p>
+          <h2 id="directory-heading">Lab Directory</h2>
+          <p id="directory-intro" class="muted"></p>
         </div>
-        <div id="directory-counts" class="directory-counts"></div>
+        <div id="directory-views" class="segmented" role="group" aria-label="Show" hidden>
+          <button type="button" data-directory-view="directory" aria-pressed="true">Lab Directory</button>
+          <button type="button" data-directory-view="details" aria-pressed="false">Birthdays, Grad Dates, and More</button>
+        </div>
       </div>
-      <div id="directory-tabs" class="pill-tabs" role="tablist" aria-label="Show"></div>
-      <div id="directory-list"></div>
-      <div id="manager-details" hidden>
-        <h3>Lab Birthdays, Grad Dates, and More</h3>
-        <p class="muted">Only lab managers can see this.</p>
-        <div id="manager-details-list"></div>
+      <div class="sheet">
+        <div id="directory-list"></div>
+        <div id="directory-tabs" class="sheet-tabs" role="tablist" aria-label="Show"></div>
       </div>
     </section>
 
     <section id="page-booking" class="upload" hidden>
       <h2>Booking</h2>
-      <p class="muted">Participant visits open for booking. A new day opens at 8:00 AM each morning, 60 days ahead. A full visit lasts 4 hours from its start; check the times on any visit marked 🕒 [SEE TIME].</p>
-      <p class="notice">Never enter participant information on this site, not even a Screener ID. When you mark a visit booked, an email to the reviewers opens in your own USC email: add the Screener ID and send it. If it doesn't open, use <strong>Email booking details to reviewers</strong>. If a participant cancels, use <strong>Cancel booking</strong>: the visit stays open so it can be rebooked, and the lab managers are emailed automatically.</p>
-      <div class="segmented booking-filter" role="group" aria-label="Show visits">
-        <button type="button" data-booking-filter="open" aria-pressed="true">Open</button>
-        <button type="button" data-booking-filter="booked" aria-pressed="false">Booked</button>
-        <button type="button" data-booking-filter="all" aria-pressed="false">All</button>
-      </div>
+      <p id="booking-intro" class="muted">Book participants into open slots on the Lab Calendar. This page lists bookings so they're easy to follow up on.</p>
+      <p class="notice">Never enter participant information on this site, not even a Screener ID. When you mark a visit booked, an email to the reviewers opens in your own USC email: add the Screener ID and send it. If a participant cancels, use <strong>Cancel booking</strong>: the visit opens again so it can be rebooked, and the lab managers are emailed automatically.</p>
+      <div id="booking-filter" class="pill-tabs booking-filter" role="tablist" aria-label="Show bookings"></div>
       <p id="booking-status" class="status" role="status"></p>
       <div id="booking-list"></div>
     </section>
@@ -419,7 +437,7 @@
   <script src="firebase-config.js?v=4"></script>
   <script src="store.js?v=10"></script>
   <script src="parser.js?v=2"></script>
-  <script src="scheduling.js?v=14"></script>
-  <script src="app.js?v=31"></script>
+  <script src="scheduling.js?v=16"></script>
+  <script src="app.js?v=33"></script>
 </body>
 </html>
