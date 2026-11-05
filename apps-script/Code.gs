@@ -71,7 +71,7 @@ function setUp() {
 }
 
 // Everything the rules need, read fresh from the site and the database.
-// The USC calendars come from Lab Management → Website management once a lab manager has saved them there, and
+// The USC calendars come from Lab Management → Website Management once a lab manager has saved them there, and
 // from the files published with the site until then.
 function loadSite() {
   const rules = loadRules();
@@ -166,7 +166,7 @@ function quickSync() {
 
 const MONTH_ABBREVIATIONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAY_ABBREVIATIONS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const EMAIL_FOOTER = "To choose which emails you get, go to Lab Management → Settings on the site.";
+const EMAIL_FOOTER = "To choose which emails you get, go to Lab Management → My Settings on the site.";
 
 // Emails are written as lines with a little markup, so what matters stands out: **bold**, __underlined__ and
 // ==highlighted==. They go out as HTML, with the markup taken out of the plain-text copy.
@@ -257,16 +257,57 @@ function namesList(people) {
   return names.length <= 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
+// --- Email choices ---
+// Before anything that sends an email, the site asks the person doing it who should get it, and saves any change
+// (people left off, no email at all, or a message to add) in emailChoices under the email's kind and ref. Each is
+// used once and then deleted; ones never used, as while staff emails are off, are cleared after two days.
+
+const CHOICE_DAYS = 2;
+
+function loadEmailChoices(today = new Date()) {
+  const choices = new Map();
+  const oldest = today.getTime() - CHOICE_DAYS * 24 * 60 * 60 * 1000;
+  for (const doc of listCollection("emailChoices")) {
+    if (!(Date.parse(doc.createdAt) >= oldest)) {
+      deleteDocument(`emailChoices/${doc.id}`);
+      continue;
+    }
+    choices.set(`${doc.kind}|${doc.ref}`, doc);
+  }
+  return choices;
+}
+
+// The choice for one email, which is then used up.
+function takeChoice(choices, kind, ref) {
+  const choice = choices.get(`${kind}|${ref}`) || null;
+  if (choice) {
+    choices.delete(`${kind}|${ref}`);
+    deleteDocument(`emailChoices/${choice.id}`);
+  }
+  return choice;
+}
+
+function leftOut(choice, email) {
+  return Boolean(choice) && (choice.none === true || (choice.skip || []).includes(email));
+}
+
+// Any messages added for these items, once each.
+function choiceMessageLines(items) {
+  const lines = [...new Set(items.map((item) => item.choice).filter((choice) => choice && choice.message)
+    .map((choice) => `${bold(`Message from ${choice.byName || choice.by}:`)} ${choice.message}`))];
+  return lines.length ? ["", ...lines] : [];
+}
+
 // Sends one email to all the reviewers who'd get the same news, rather than one each. Everything comes from the
 // account the script runs under, so separate emails would also show up there as copies of each other.
 // `kind` is one of the REVIEWER_EMAILS keys, and reviewers who've turned that kind off are left out.
-// Items are { id, owner }; nobody is emailed about something they did themselves. `compose` turns a reviewer
-// group's items into { subject, lines }.
+// Items are { id, owner, choice }; nobody is emailed about something they did themselves, or that they were left off
+// (see Email choices). `compose` turns a reviewer group's items into { subject, lines }.
 function emailReviewers(rules, members, kind, items, compose) {
   const reviewers = members.filter((member) => member.role === "reviewer" && rules.wantsEmail(member, kind));
   const groups = new Map();
   for (const reviewer of reviewers) {
-    const theirs = items.filter((item) => item.owner !== reviewer.id);
+    const theirs = items.filter((item) => item.owner !== reviewer.id && !leftOut(item.choice, reviewer.id));
     if (!theirs.length) continue;
     const key = theirs.map((item) => item.id).join("|");
     if (!groups.has(key)) groups.set(key, { reviewers: [], items: theirs });
@@ -274,7 +315,7 @@ function emailReviewers(rules, members, kind, items, compose) {
   }
   for (const group of groups.values()) {
     const { subject, lines } = compose(group.items);
-    sendEmail({ to: group.reviewers.map((reviewer) => reviewer.id).join(","), subject, lines: reviewerLines(group.reviewers, lines), footer: [EMAIL_FOOTER] });
+    sendEmail({ to: group.reviewers.map((reviewer) => reviewer.id).join(","), subject, lines: reviewerLines(group.reviewers, [...lines, ...choiceMessageLines(group.items)]), footer: [EMAIL_FOOTER] });
   }
   return groups.size;
 }
@@ -339,19 +380,24 @@ function checkRequests() {
   }
 
   const notified = new Set(JSON.parse(saved));
-  const fresh = pending.filter((request) => !notified.has(request.id));
+  const choices = loadEmailChoices();
+  const fresh = pending.filter((request) => !notified.has(request.id)).map((request) => ({ ...request, choice: takeChoice(choices, "requests", request.id) }));
   // Requests and saved updates are separate kinds of email, so each reviewer gets just the ones they want.
-  const updateItems = notices.map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary }));
+  const updateItems = notices.map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary, choice: takeChoice(choices, "updates", `notices/${notice.id}`) }));
   const emailed = emailReviewers(rules, members, "requests", fresh, (requests) => requestsEmail(requests, nameOf))
     + emailReviewers(rules, members, "updates", updateItems, (updates) => updatesEmail(updates, nameOf));
   // Requests that were waiting last time and have been decided since: the person who sent them hears how it went.
   const decided = [...notified].filter((id) => !pendingIds.includes(id)).map((id) => {
     const [collection, docId] = id.split("/");
     const request = (collection === "timeOff" ? allTimeOff : allChanges).find((item) => item.id === docId);
-    return request && ["approved", "declined"].includes(request.status) ? { ...request, kind: collection } : null;
+    return request && ["approved", "declined"].includes(request.status) ? { ...request, kind: collection, choice: takeChoice(choices, "reviewResult", id) } : null;
   }).filter(Boolean);
   if (CONFIG.emailLabMembers) {
-    for (const request of decided) sendEmail({ to: request.ownerEmail, ...reviewResultEmail(request, nameOf) });
+    for (const request of decided) {
+      if (leftOut(request.choice, request.ownerEmail)) continue;
+      const email = reviewResultEmail(request, nameOf);
+      sendEmail({ to: request.ownerEmail, subject: email.subject, lines: [...email.lines, ...choiceMessageLines([request])] });
+    }
   } else if (decided.length) {
     console.log(`${decided.length} request(s) decided; lab member emails are switched off, so their senders weren't emailed.`);
   }
@@ -429,6 +475,10 @@ function checkCancellations(site = loadSite(), staffing = listCollection("staffi
     if (!current[key] && old.date >= todayIso) items.push({ id: `${key}:cancelled`, owner: null, key, visit: old, kind: "visit" });
   }
   items.sort((a, b) => a.visit.date.localeCompare(b.visit.date));
+  if (items.length) {
+    const choices = loadEmailChoices(today);
+    for (const item of items) item.choice = takeChoice(choices, "cancellations", item.id);
+  }
   const emailed = emailReviewers(rules, members, "cancellations", items, (theirs) => cancellationsEmail(rules, theirs));
   if (items.length) console.log(`${items.length} cancellation(s); sent ${emailed} email(s).`);
   return { emailed, cancellations: items.length };
@@ -564,7 +614,7 @@ function scheduleReminderEmail(name, semester, greeting, reminder) {
       "",
       `${reminder ? "Just a reminder: please" : "Please"} ${bold(`add your class schedule for ${semester.name}`)} on the lab's Researcher Portal, so we know when you can work in the lab. Classes start ${dateMark(emailDateWithDay(semester.classesBegin))}.`,
       "",
-      `Go to ${bold("Schedules → Update your Availability → Class schedule")}, choose ${semester.name}, and upload a screenshot or PDF of your schedule, or enter the times by hand: ${CONFIG.siteUrl}`,
+      `Go to ${bold("Schedules → Update Your Availability → Class Schedule")}, choose ${semester.name}, and upload a screenshot or PDF of your schedule, or enter the times by hand: ${CONFIG.siteUrl}`,
       "",
       `Not taking classes in ${semester.name}? Click ${bold(`I have no classes in ${semester.name}`)} on that page instead, and the reminders will stop.`,
       "",
@@ -583,7 +633,7 @@ function finalsEmail(name, semester, finals, reminder) {
       "",
       `Final exams run ${dateMark(`${emailDateWithDay(finals.from)} – ${emailDateWithDay(finals.to)}`)}. Your regular class times don't apply then, so please ${bold("add the times of your finals")} on the lab's Researcher Portal, so nobody schedules you during an exam.`,
       "",
-      `Go to ${bold("Schedules → Update your Availability → Request time off")} and add each exam for part of a day, or drag across its time on the Lab Calendar and choose ${bold("Doesn't repeat")}: ${CONFIG.siteUrl}`,
+      `Go to ${bold("Schedules → Update Your Availability → Request Time Off")} and add each exam for part of a day, or drag across its time on the Lab Calendar and choose ${bold("Doesn't repeat")}: ${CONFIG.siteUrl}`,
       "",
       reminder ? "If none of your finals clash with the lab, you can ignore this." : "If none of your finals clash with the lab, there's nothing to add.",
     ],
@@ -636,7 +686,7 @@ function missingSchedulesEmail(semester, people) {
       ...people.map((person) => `• ${bold(person.name)} (${person.id})`),
       "",
       CONFIG.emailLabMembers ? "They've been reminded every two weeks since a month before last semester ended." : "Lab member emails are switched off for now, so they haven't been reminded.",
-      `You can add it for them under ${bold("Lab Management → Lab members → Edit schedule")}: ${CONFIG.siteUrl}`,
+      `You can add it for them under ${bold("Lab Management → Lab Members → Edit Schedule")}: ${CONFIG.siteUrl}`,
     ],
   };
 }
@@ -677,7 +727,7 @@ function calendarDataEmail(needs) {
       "",
       ...needs.map((need) => `• ${need}`),
       "",
-      `Please add the next year's dates under ${bold("Lab Management → Website management")}: ${CONFIG.siteUrl}#website`,
+      `Please add the next year's dates under ${bold("Lab Management → Website Management")}: ${CONFIG.siteUrl}#website`,
       "Until they're added, classes aren't limited to semester dates and visits could be scheduled on staff holidays.",
       "",
       "USC's academic calendar: https://usc.edu/academic-calendar/",
@@ -936,7 +986,7 @@ function partLines(rules, iso, appointment, kind, result) {
   const lines = [];
   if (state === "problem") lines.push(`${heading}: ${TITLE_MARKS.problem} can't be fully staffed`, ...result.problems.map((problem) => `• ${problem}`));
   else if (state === "tight") lines.push(`${heading}: ${TITLE_MARKS.tight} ${result.tight ? `tight timing. ${result.timing}.` : "staffable, with a warning"}`, ...(result.warnings || []).map((warning) => `• Warning: ${warning}.`));
-  else lines.push(`${heading}: ${TITLE_MARKS.ready} ready to staff`);
+  else lines.push(`${heading}: ${TITLE_MARKS.ready} able to be staffed`);
   for (const group of result.groups) {
     const label = group.label.endsWith("Available") ? group.label : `${group.label} Available`;
     lines.push(`${label}: ${group.people.map(rules.personLabel).join(", ") || "No one"}`);
@@ -1153,18 +1203,18 @@ function staffChanges(before, after, todayIso, stillScheduled) {
       const was = old && old.people[email];
       const seeTime = (visit.seeTime && visit.seeTime[email]) || [];
       // Only someone's own roles and times count: a moved scan doesn't email the lab staff.
-      if (!was) add(email, { type: "assigned", visit, roles, seeTime });
-      else if (was.join("|") !== roles.join("|") || old.date !== visit.date) add(email, { type: "changed", visit, roles, was, oldVisit: old, seeTime });
+      if (!was) add(email, { type: "assigned", key, visit, roles, seeTime });
+      else if (was.join("|") !== roles.join("|") || old.date !== visit.date) add(email, { type: "changed", key, visit, roles, was, oldVisit: old, seeTime });
     }
     for (const [email, roles] of Object.entries((old && old.people) || {})) {
-      if (!visit.people[email]) add(email, { type: "removed", visit: old, roles });
+      if (!visit.people[email]) add(email, { type: "removed", key, visit: old, roles });
     }
   }
   for (const [key, old] of Object.entries(before)) {
     // Visits that have happened are simply forgotten.
     if (after[key] || old.date < todayIso) continue;
     const type = stillScheduled(key, old.date) ? "removed" : "cancelled";
-    for (const [email, roles] of Object.entries(old.people)) add(email, { type, visit: old, roles });
+    for (const [email, roles] of Object.entries(old.people)) add(email, { type, key, visit: old, roles });
   }
   return changes;
 }
@@ -1192,6 +1242,7 @@ function staffEmail(rules, name, changes) {
     } else {
       lines.push(`The participant visit on ${date} (${change.visit.visit}) has been ${bold(underline("cancelled"))}. You were down for: ${change.roles.join("; ")}.`);
     }
+    if (change.message) lines.push(`${bold(`Message from ${change.messageBy}:`)} ${change.message}`);
     const current = change.type === "assigned" || change.type === "changed";
     if (current && change.visit.participants > 1) lines.push(`👥 ${bold(`${change.visit.participants} participants`)} are scheduled that day, so check which visit is yours.`);
     if (current && (change.seeTime || []).length) {
@@ -1220,8 +1271,17 @@ function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), t
   const stillScheduled = (key, date) => visitsOn(rules, date, site.appointments, site.holidays).some((visit) => rules.visitKey(visit) === key);
   const changes = staffChanges(before, after, isoOf(today), stillScheduled);
   const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;
+  // Whoever made a change could leave people off its email, or add a message (see Email choices).
+  const keys = [...new Set(Object.values(changes).flat().map((change) => change.key))];
+  const choices = keys.length ? loadEmailChoices(today) : new Map();
+  const choiceFor = new Map(keys.map((key) => [key, takeChoice(choices, "staff", key)]));
   let emailed = 0;
-  for (const [email, theirs] of Object.entries(changes)) {
+  for (const [email, all] of Object.entries(changes)) {
+    const theirs = all.filter((change) => !leftOut(choiceFor.get(change.key), email)).map((change) => {
+      const choice = choiceFor.get(change.key);
+      return choice && choice.message ? { ...change, message: choice.message, messageBy: choice.byName || choice.by } : change;
+    });
+    if (!theirs.length) continue;
     sendEmail({ to: email, ...staffEmail(rules, nameOf(email), theirs) });
     emailed++;
   }

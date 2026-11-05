@@ -87,10 +87,11 @@ service cloud.firestore {
         && (!('reviewNote' in data) || (data.reviewNote is string && data.reviewNote.size() <= 200));
     }
 
-    // Bookers can look up the reviewers, so they can email them a booking's participant details.
+    // Everyone in the lab can look up the reviewers: bookers email them a booking's participant details, and the site
+    // shows who's emailed about what someone does.
     match /members/{memberEmail} {
-      allow get: if verified() && (memberEmail == email() || isReviewer() || (isBooker() && resource.data.role == 'reviewer'));
-      allow list: if isReviewer() || (isBooker() && resource.data.role == 'reviewer');
+      allow get: if verified() && (memberEmail == email() || isReviewer() || (isMember() && resource.data.role == 'reviewer'));
+      allow list: if isReviewer() || (isMember() && resource.data.role == 'reviewer');
       allow create, update: if isReviewer()
         && memberEmail == memberEmail.lower()
         && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify', 'emails', 'title'])
@@ -214,8 +215,8 @@ service cloud.firestore {
     }
 
     // Visits hold no participant information, only times and whether they're booked and confirmed.
-    // Bookers can only book a visit (asking for another start time if needed) or cancel its booking, from the spring
-    // 2027 visits on. Only reviewers confirm bookings and change visit times.
+    // Bookers can only book a visit (asking for another start time if needed) or cancel its booking, from the
+    // November 5, 2026 visits on. Only reviewers confirm bookings and change visit times.
     match /appointments/{id} {
       // Everyone in the lab sees the Lab Calendar's open slots and scheduled visits; staffing is kept separately.
       allow read: if isMember();
@@ -225,7 +226,7 @@ service cloud.firestore {
       allow create: if isBooker()
         && request.resource.data.keys().hasOnly(appointmentKeys())
         && validBookingBy(request.resource.data)
-        && request.resource.data.date is string && request.resource.data.date >= '2027-01-03'
+        && request.resource.data.date is string && request.resource.data.date >= '2026-11-05'
         && id == 'default-' + request.resource.data.date
         && request.resource.data.defaultFor == request.resource.data.date
         && request.resource.data.cancelled == false
@@ -233,7 +234,7 @@ service cloud.firestore {
         && request.resource.data.scan == {'start': '11:00', 'end': '13:00', 'wandingRequired': true};
       allow update: if isBooker()
         && resource.data.cancelled == false
-        && resource.data.date >= '2027-01-03'
+        && resource.data.date >= '2026-11-05'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(bookingKeys())
         && validBookingBy(request.resource.data);
       allow delete: if isReviewer();
@@ -273,6 +274,34 @@ service cloud.firestore {
         && request.resource.data.date is string
         && request.resource.data.managers is list && request.resource.data.managers.size() <= 3
         && request.resource.data.approvedBy == email();
+    }
+
+    // The Staffing calendar's reference slots for a day, when they're changed from the usual ones. Only reviewers.
+    match /referenceSlots/{date} {
+      allow read, delete: if isReviewer();
+      allow create, update: if isReviewer()
+        && request.resource.data.keys().hasOnly(['date', 'slots', 'updatedBy'])
+        && request.resource.data.date == date
+        && request.resource.data.slots is list && request.resource.data.slots.size() <= 12
+        && request.resource.data.updatedBy == email();
+    }
+
+    // Who to leave off the email about something someone just did, and any message to add. Anyone in the lab saves
+    // their own; only reviewers (and the Apps Script) read them.
+    match /emailChoices/{id} {
+      allow read, delete: if isReviewer();
+      // A choice that's still waiting can be replaced by whoever made it, or by a reviewer.
+      allow create, update: if isMember()
+        && (resource == null || resource.data.by == email() || isReviewer())
+        && request.resource.data.keys().hasOnly(['kind', 'ref', 'skip', 'none', 'message', 'by', 'byName', 'createdAt'])
+        && request.resource.data.kind in ['requests', 'updates', 'cancellations', 'staff', 'reviewResult']
+        && request.resource.data.ref is string && request.resource.data.ref.size() <= 200
+        && request.resource.data.skip is list && request.resource.data.skip.size() <= 50
+        && request.resource.data.none is bool
+        && request.resource.data.message is string && request.resource.data.message.size() <= 1000
+        && request.resource.data.by == email()
+        && request.resource.data.byName is string && request.resource.data.byName.size() <= 100
+        && request.resource.data.createdAt is string;
     }
 
     match /timeOff/{id} {

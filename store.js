@@ -40,7 +40,8 @@ const Store = (() => {
       return (await db.collection("members").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
     },
 
-    // Bookers can't see the lab list, only who the reviewers are, so they can email them.
+    // Lab members can't see the lab list, only who the reviewers are, so bookers can email them and the site can say
+    // who's emailed about what someone does.
     async listReviewers() {
       return (await db.collection("members").where("role", "==", "reviewer").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
     },
@@ -88,9 +89,16 @@ const Store = (() => {
       const stops = [watch("timeOff"), watch("changeRequests")];
       return () => stops.forEach((stop) => stop());
     },
+    // An id for a new document, made before it's saved so an email choice can point to it.
+    newId: (collection) => db.collection(collection).doc().id,
+
     // Tells reviewers about a Grad Student/Post-Doc's change; the Apps Script emails these and then deletes them.
-    createNotice: (data) => db.collection("notices").add(data),
-    createChangeRequest: (data) => db.collection("changeRequests").add(data),
+    createNotice: (data, id) => (id ? db.collection("notices").doc(id).set(data) : db.collection("notices").add(data)),
+    createChangeRequest: (data, id) => (id ? db.collection("changeRequests").doc(id).set(data) : db.collection("changeRequests").add(data)),
+
+    // Who to leave off, and any message for, the email about something someone just did. The Apps Script reads these
+    // when it sends that email, then deletes them.
+    saveEmailChoice: (id, data) => db.collection("emailChoices").doc(id).set(data),
     deleteChangeRequest: (id) => db.collection("changeRequests").doc(id).delete(),
     decideChangeRequest: (id, decision) => db.collection("changeRequests").doc(id).update(decision),
 
@@ -158,6 +166,11 @@ const Store = (() => {
     },
     listProfiles: async () => (await db.collection("profiles").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() })),
     saveProfile: (email, data) => db.collection("profiles").doc(email).set(data),
+
+    // The Staffing calendar's days whose reference slots were changed, one per date. Only reviewers use these.
+    listReferenceDays: () => listAll("referenceSlots"),
+    saveReferenceDay: (iso, data) => db.collection("referenceSlots").doc(iso).set(data),
+    deleteReferenceDay: (iso) => db.collection("referenceSlots").doc(iso).delete(),
 
     // Who is staffing each visit, saved under the visit's key. Only reviewers can read or change these.
     listStaffing: () => listAll("staffing"),

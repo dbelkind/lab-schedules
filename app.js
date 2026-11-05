@@ -65,6 +65,8 @@ let calendarView = "appointments";
 let adminView = "staffing";
 let teamView = "unavailability";
 let staffing = [];
+// The Staffing calendar's days whose slots have been changed from the usual ones.
+let referenceDays = [];
 let reviewerContacts = [];
 let bookingFilter = "open";
 let myProfile = null;
@@ -325,7 +327,7 @@ function isMineView() {
   return calendarView === "mine";
 }
 
-// My calendar only shows the person whose times are being entered; Unavailability shows everyone not turned off.
+// My availability's calendar only shows the person whose times are being entered; Unavailability shows everyone not turned off.
 function showsBlock(block) {
   return isMineView() ? block.ownerEmail === targetEmail() : !hidden.has(block.member);
 }
@@ -387,8 +389,9 @@ function renderWeek() {
     else if (appointmentsView) renderAppointmentsColumn(column, iso);
     else if (availabilityView) renderAvailabilityColumn(column, iso, colorOf);
     else renderUnavailabilityColumn(column, date, colorOf);
-    // Dragging across empty time adds a visit (reviewers) or an unavailable time.
-    if (labView || (appointmentsView && isReviewer())) enableCreate(column, iso, openNewVisitDialog);
+    // Dragging across empty time adds a slot to check (Staffing), a visit (reviewers) or an unavailable time.
+    if (labView) enableCreate(column, iso, openNewReferenceDialog);
+    else if (appointmentsView && isReviewer()) enableCreate(column, iso, openNewVisitDialog);
     else if (!availabilityView && !appointmentsView) enableCreate(column, iso, openNewConflictDialog);
     return column;
   });
@@ -397,23 +400,25 @@ function renderWeek() {
 }
 
 // --- The Availability calendar (reviewers only) ---
-// The opposite of Unavailability: each block is a time someone has nothing on their schedule. A role filter, with
-// groups inside groups, narrows it to people who can do certain things.
+// The opposite of Unavailability: each block is a time someone has nothing on their schedule. The filter has two
+// parts, each with groups inside groups: positions in the lab, and training (the same groups as the Availability
+// Checker).
 
+const POSITION_LABELS = { RA: "RAs", "PhD Student": "PhD Students", "Post-Doc": "Post-Docs", "Lab Manager": "Lab Managers", PI: "PI" };
 const AVAILABILITY_FILTERS = [
-  { key: "managers", label: "Lab managers", matches: (person) => person.role === "reviewer" },
-  { key: "lab", label: "Lab portion", children: [
-    { key: "Dry Lab", label: "Dry Lab" },
-    { key: "Wet Lab", label: "Wet Lab" },
-    { key: "phlebotomy", label: "Phlebotomy", children: PHLEBOTOMY_LEVELS.map((level) => ({ key: level, label: level })) },
-  ] },
-  { key: "scanning", label: "Scanning", children: [
+  { key: "position", label: "Position", section: "position", children: DIRECTORY_TITLES.map((title) => (
+    { key: `title:${title}`, label: POSITION_LABELS[title] || title, matches: (person) => titleOf(person) === title }
+  )) },
+  { key: "phlebotomy", label: "Phlebotomists", section: "training", children: PHLEBOTOMY_LEVELS.map((level) => ({ key: level, label: level })) },
+  { key: "Wet Lab", label: "Wet Lab", section: "training" },
+  { key: "Dry Lab", label: "Dry Lab", section: "training" },
+  { key: "scanning", label: "Scanners", section: "training", children: [
     { key: "Level 2 Scanning", label: "Level 2" },
     { key: "Level 1 Scanning", label: "Level 1" },
     { key: "Auxiliary Support Scanning", label: "Auxiliary Support" },
     { key: "Wanding/Taping", label: "Wanding/Taping" },
   ] },
-  { key: "Booking", label: "Booking" },
+  { key: "Booking", label: "Booking", section: "training" },
 ];
 
 function filterLeaves(node) {
@@ -424,10 +429,14 @@ function leafMatches(leaf, person) {
   return leaf.matches ? leaf.matches(person) : (person.skills || []).includes(leaf.key);
 }
 
-// Nothing ticked shows everyone; otherwise anyone who can do any of the ticked things.
+// Nothing ticked shows everyone. Within positions, or within training, anyone matching any ticked box is shown;
+// ticking both narrows it to people in both, such as RAs who are phlebotomists.
 function matchesRoleFilter(person) {
-  if (!availabilityRoles.size) return true;
-  return AVAILABILITY_FILTERS.flatMap(filterLeaves).some((leaf) => availabilityRoles.has(leaf.key) && leafMatches(leaf, person));
+  return ["position", "training"].every((section) => {
+    const ticked = AVAILABILITY_FILTERS.filter((group) => group.section === section).flatMap(filterLeaves)
+      .filter((leaf) => availabilityRoles.has(leaf.key));
+    return !ticked.length || ticked.some((leaf) => leafMatches(leaf, person));
+  });
 }
 
 // A group's box is ticked when everything in it is, and half-ticked when some of it is.
@@ -465,7 +474,7 @@ function renderRoleFilters() {
   const panel = document.getElementById("role-filters");
   const head = el("div", "role-filters-head");
   const shown = members.filter(matchesRoleFilter).length;
-  head.append(el("strong", "", "Filter by role"), el("span", "muted", availabilityRoles.size ? `Showing ${shown} of ${members.length} people` : "Showing everyone"));
+  head.append(el("strong", "", "Filter by Position and Training"), el("span", "muted", availabilityRoles.size ? `Showing ${shown} of ${members.length} people` : "Showing everyone"));
   if (availabilityRoles.size) {
     const clear = el("button", "link-button", "Clear");
     clear.type = "button";
@@ -484,7 +493,7 @@ function renderRoleFilters() {
       groups.append(el("div", "role-group error", `Couldn't show ${group.label} (${error.message}).`));
     }
   }
-  panel.replaceChildren(head, groups);
+  panel.replaceChildren(head, groups, el("p", "muted role-filters-note", "Ticking a position and a training shows only people with both, such as RAs who are phlebotomists."));
 }
 
 function availabilityAllDay(iso) {
@@ -578,20 +587,19 @@ function renderUnavailabilityColumn(column, date, colorOf) {
   }
 }
 
+// The Staffing calendar's all-day row: any staff holiday, and a way back to the usual slots once a day's are changed.
 function labAllDay(iso) {
   const cell = el("div", "all-day");
   const holiday = staffHolidayOn(iso, staffHolidays);
   if (holiday) cell.append(el("div", "event event-holiday", `Staff holiday: ${holiday.name}`));
-  const cancelled = cancelledDefaultOn(iso, appointments);
-  if (cancelled && !holiday) {
-    const chip = el("div", "event event-cancelled", "Visit cancelled · Restore");
-    chip.title = "Bring back this day's default participant visit";
+  if (referenceDays.some((day) => day.date === iso)) {
+    const chip = el("div", "event event-cancelled", "Slots changed · Reset");
+    chip.title = "Bring back this day's usual 9:00–11:00 Lab and 11:00–1:00 Scan slots";
     makeClickable(chip, async () => {
       try {
-        await Store.deleteAppointment(cancelled.id);
-        pingSync();
+        await Store.deleteReferenceDay(iso);
         await refresh();
-        setCalendarStatus("Visit restored.");
+        setCalendarStatus("Usual slots back.");
       } catch (error) {
         setCalendarStatus(friendlyError(error), true);
       }
@@ -638,19 +646,6 @@ function unusualNotice(appointment, kind) {
   return [box];
 }
 
-const BOOKING_SHORT = { booked: "Booked", rebooking: "Rebooking", open: "Open" };
-
-function bookingLabel(appointment) {
-  if (appointment.booking === "booked") return `Booked${appointment.bookedByName ? ` by ${appointment.bookedByName}` : ""}`;
-  if (appointment.booking === "rebooking") return "Booking cancelled, open to rebook";
-  return "Open for booking";
-}
-
-// Visits before booking moved to the website were booked the old way, so they don't show a booking status.
-function showsBooking(iso, appointment) {
-  return Boolean(appointment.booking) || iso >= BOOKING_STARTS;
-}
-
 // Booking (or cancelling one) always leaves the visit for a reviewer to confirm. `requestedStart` is a start time
 // the booker asked for instead of the slot's, or "".
 function bookingFields(status, requestedStart = "") {
@@ -661,46 +656,55 @@ function staffingFor(appointment) {
   return staffing.find((doc) => doc.visitKey === visitKey(appointment)) || null;
 }
 
+// --- The Staffing calendar ---
+// A reference for lab managers: every day, weekends and holidays included, has a 9:00–11:00 AM Lab slot and an
+// 11:00 AM–1:00 PM Scan slot showing who's free to staff them. These aren't visits: changing or deleting one only
+// changes this view, and booking and staffing happen on the Lab Calendar. A day whose slots are changed is saved as
+// its whole list of slots.
+
+const REFERENCE_SLOTS = [{ kind: "lab", ...DEFAULT_SLOTS.lab }, { kind: "scan", start: DEFAULT_SLOTS.scan.start, end: DEFAULT_SLOTS.scan.end }];
+
+function referenceSlotsOn(iso) {
+  const day = referenceDays.find((item) => item.date === iso);
+  return (day ? day.slots : REFERENCE_SLOTS).map((slot, index) => ({ ...slot, index }));
+}
+
+// A slot is checked as part of a visit with the day's first slot of the other kind, so lab manager cover spans both.
+function referenceVisit(iso, slot) {
+  const slots = referenceSlotsOn(iso);
+  const part = (kind) => {
+    const found = slot.kind === kind ? slot : slots.find((item) => item.kind === kind);
+    if (!found) return null;
+    return kind === "scan" ? { start: found.start, end: found.end, wandingRequired: true } : { start: found.start, end: found.end };
+  };
+  return { lab: part("lab"), scan: part("scan") };
+}
+
+async function saveReferenceSlots(iso, slots) {
+  await Store.saveReferenceDay(iso, { date: iso, slots: slots.map(({ kind, start, end }) => ({ kind, start, end })), updatedBy: me.email });
+  await refresh();
+}
+
 function renderLabColumn(column, iso) {
-  const visits = visitsOn(iso);
-  const items = visits.flatMap((appointment, index) =>
-    ["lab", "scan"].filter((kind) => appointment[kind]).map((kind) => ({
-      start: appointment[kind].start,
-      end: appointment[kind].end,
-      appointment,
-      kind,
-      number: visits.length > 1 ? index + 1 : 0,
-    })));
+  const slots = referenceSlotsOn(iso);
+  const items = slots.map((slot) => ({ start: slot.start, end: slot.end, slot }));
   for (const { block: item, lane, laneCount } of layoutDay(items)) {
-    const { appointment } = item;
-    const result = evaluateSlot(iso, appointment, item.kind);
+    const { slot } = item;
+    const result = evaluateSlot(iso, referenceVisit(iso, slot), slot.kind);
     const state = staffingState(result);
     const node = el("div", `slot slot-${state}`);
     placeBlock(node, item.start, item.end, lane, laneCount);
     node.append(
-      el("strong", "", `${item.number ? `Visit ${item.number} · ` : ""}${SLOT_TITLES[item.kind]}`),
+      el("strong", "", slot.kind === "lab" ? "Lab" : "Scan"),
       el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`),
     );
-    const chips = el("div", "slot-chips");
-    if (unusualTimes(appointment, item.kind).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
-    if (visits.length > 1) chips.append(el("span", "slot-chip chip-many", `👥 ${visits.length} participants`));
-    if (visitPartsLabel(appointment)) chips.append(el("span", "slot-chip", visitPartsLabel(appointment)));
-    if (showsBooking(iso, appointment)) {
-      chips.append(el("span", `slot-chip chip-${appointment.booking || "open"}`, BOOKING_SHORT[appointment.booking || "open"]));
-    }
-    const doc = staffingFor(appointment);
-    if (doc) {
-      const conflict = checkAssignment(iso, appointment, doc, staffingData()).issues.length > 0;
-      chips.append(el("span", `slot-chip ${conflict ? "chip-conflict" : "chip-staffed"}`, conflict ? "Staffing conflict" : "Staffed"));
-    }
-    if (chips.children.length) node.append(chips);
     if (state === "problem") {
       for (const problem of result.problems) node.append(el("div", "slot-issue", problem));
     } else if (state === "tight") {
       if (result.tight) node.append(el("div", "slot-tight", "Tight timing"));
       for (const flag of result.flags || []) node.append(el("div", "slot-tight", flag));
     } else {
-      node.append(el("div", "slot-ok", "Ready to staff"));
+      node.append(el("div", "slot-ok", "Able to be staffed"));
     }
     for (const group of result.groups) {
       const names = group.people.map(personLabel).join(", ") || "none";
@@ -711,11 +715,11 @@ function renderLabColumn(column, iso) {
       start: item.start,
       end: item.end,
       draggable: true,
-      onOpen: () => openSlotDialog(iso, appointment, item.kind),
+      onOpen: () => openReferenceDialog(iso, slot),
       onCommit: async (start, end) => {
         try {
-          await saveSlot(appointment, item.kind, { ...appointment[item.kind], start, end });
-          setCalendarStatus(`${SLOT_TITLES[item.kind]} moved to ${formatTime(start)} – ${formatTime(end)}.`);
+          await saveReferenceSlots(iso, slots.map((other) => (other.index === slot.index ? { ...other, start, end } : other)));
+          setCalendarStatus(`${slot.kind === "lab" ? "Lab" : "Scan"} slot moved to ${formatTime(start)} – ${formatTime(end)}.`);
         } catch (error) {
           renderWeek();
           setCalendarStatus(friendlyError(error), true);
@@ -724,6 +728,115 @@ function renderLabColumn(column, iso) {
     });
     column.append(node);
   }
+}
+
+// Who's free for a slot, and what each role needs. Only the Staffing calendar explains the rules in full.
+function availabilityDetails(iso, appointment, kind, { explain = false } = {}) {
+  const result = evaluateSlot(iso, appointment, kind);
+  const nodes = [];
+  const state = staffingState(result);
+  if (state === "problem") {
+    const issues = el("div", "slot-issues");
+    issues.append(el("strong", "", "Can't be fully staffed:"));
+    for (const problem of result.problems) issues.append(el("div", "", problem));
+    nodes.push(issues);
+  } else if (state === "tight" && result.tight) {
+    const tight = el("div", "slot-tight-box");
+    tight.append(el("strong", "", "Tight timing: "), result.timing);
+    nodes.push(tight);
+  }
+  if (state !== "problem") {
+    for (const warning of result.warnings || []) {
+      const box = el("div", "slot-tight-box");
+      box.append(el("strong", "", "Warning: "), warning);
+      nodes.push(box);
+    }
+  }
+  if (state === "ready") nodes.push(el("p", "slot-ok", "Able to be staffed: every requirement can be met."));
+  for (const group of result.groups) {
+    const section = el("div", "staff-group");
+    section.append(el("h3", "", `${group.label}${group.label.endsWith("Available") ? "" : " Available"}:`));
+    section.append(el("p", group.people.length ? "" : "muted", group.people.map(personLabel).join(", ") || "No one"));
+    nodes.push(section);
+  }
+  if ((result.notes || []).length) {
+    const notes = el("div", "staff-notes");
+    notes.append(el("h3", "", "Limited Availability:"));
+    for (const note of result.notes) notes.append(el("p", "", `*${note}`));
+    nodes.push(notes);
+  }
+  if (explain && kind === "lab") {
+    nodes.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people. Without an Experienced Phlebotomist the visit gets a warning, and with only a Training Phlebotomist it needs mobile phlebotomy booked in advance."));
+  }
+  if (explain && kind === "scan") {
+    nodes.push(el("p", "muted", "A scan needs two scanners: Auxiliary Support Scanning only counts alongside someone with Level 2 Scanning, and outside weekdays 8 AM–5 PM one of them needs Level 2 Scanning. Someone also needs to do wanding/taping."));
+  }
+  if (explain) nodes.push(el("p", "muted", "A lab manager needs to be free for the whole visit, handing off if needed, and at the very least for the wrap-up after the scan."));
+  return nodes;
+}
+
+// The Lab Calendar's visits show who's available for each part, so lab managers can see it while confirming and staffing.
+function visitAvailability(iso, appointment, open = true) {
+  const box = el("details", "visit-availability");
+  box.open = open;
+  box.append(el("summary", "", "Availability"));
+  for (const kind of ["lab", "scan"].filter((name) => appointment[name])) {
+    const slot = appointment[kind];
+    box.append(el("h3", "availability-part", `${kind === "lab" ? "Lab Portion" : "Scan"}, ${formatTime(slot.start)} – ${formatTime(slot.end)}`), ...availabilityDetails(iso, appointment, kind));
+  }
+  return box;
+}
+
+function openReferenceDialog(iso, slot) {
+  const slots = referenceSlotsOn(iso);
+  const times = timeRange(slot.start, slot.end);
+  const title = slot.kind === "lab" ? "Lab Slot" : "Scan Slot";
+  const body = [
+    el("p", "muted", `${formatIsoWithDay(iso)} · For reference only: this isn't a visit, and changing or deleting it doesn't change the Lab Calendar.`),
+    times.node,
+  ];
+  if (slot.kind === "scan" && isOffHours(iso, slot.start, slot.end)) {
+    body.push(el("p", "notice", "This scan is outside regular hours (weekdays 8 AM–5 PM), so someone with Level 2 Scanning is required."));
+  }
+  body.push(...availabilityDetails(iso, referenceVisit(iso, slot), slot.kind, { explain: true }));
+  openDialog(title, body, [
+    dialogButton("Save", "primary", async () => {
+      const range = times.read();
+      await saveReferenceSlots(iso, slots.map((other) => (other.index === slot.index ? { ...other, ...range } : other)));
+      return "Saved.";
+    }),
+    confirmingButton("Delete", "Click again to delete it", "secondary danger", async () => {
+      await saveReferenceSlots(iso, slots.filter((other) => other.index !== slot.index));
+      return `${slot.kind === "lab" ? "Lab" : "Scan"} slot deleted from the Staffing calendar.`;
+    }),
+    closeButton(),
+  ]);
+}
+
+// Dragging across empty time on the Staffing calendar adds a slot to check.
+function openNewReferenceDialog(iso, start, end) {
+  const times = timeRange(start, end);
+  const choice = el("fieldset", "mode");
+  choice.append(el("legend", "", "Which kind of slot?"));
+  const radios = [["lab", "Lab"], ["scan", "Scan"]].map(([value, text], index) => {
+    const radio = el("input");
+    radio.type = "radio";
+    radio.name = "new-reference-kind";
+    radio.value = value;
+    radio.checked = index === 0;
+    const label = el("label");
+    label.append(radio, text);
+    choice.append(label);
+    return radio;
+  });
+  openDialog("Add a Slot to Check", [el("p", "muted", `${formatIsoWithDay(iso)} · For reference only, to see who's free. It isn't a visit.`), choice, times.node], [
+    dialogButton("Add slot", "primary", async () => {
+      const kind = radios.find((radio) => radio.checked).value;
+      await saveReferenceSlots(iso, [...referenceSlotsOn(iso), { kind, ...times.read() }]);
+      return "Slot added.";
+    }),
+    closeButton(),
+  ]);
 }
 
 // --- Who can staff a visit ---
@@ -907,7 +1020,8 @@ async function runDialogAction(button, action) {
     dialogEl.close();
     if (message) setCalendarStatus(message);
   } catch (error) {
-    setDialogStatus(friendlyError(error), true);
+    // Going back from the email pop-up isn't an error: the dialog just stays as it was.
+    setDialogStatus(friendlyError(error), !error.calledOff);
   } finally {
     button.disabled = false;
   }
@@ -994,7 +1108,7 @@ function daysPicker(selectedDays) {
 
 function openEntryDialog(block, proposed) {
   const entry = availability.find((item) => item.id === block.id) || block;
-  const kindLabel = entry.type === "class" ? "Class" : "Standing conflict";
+  const kindLabel = entry.type === "class" ? "Class" : "Standing Conflict";
   if (!canEditEntriesOf(entry.ownerEmail)) {
     openDialog(`${block.member}: ${kindLabel.toLowerCase()}`, [el("p", "", describeEntry(entry))], [closeButton()]);
     return;
@@ -1016,7 +1130,7 @@ function openEntryDialog(block, proposed) {
   } else if (isGrad()) {
     body.push(el("p", "muted", "Changes save straight away, and reviewers are emailed about them."));
   }
-  const title = entry.ownerEmail === me.email ? `Edit ${kindLabel.toLowerCase()}` : `Edit ${nameFor(entry.ownerEmail)}'s ${kindLabel.toLowerCase()}`;
+  const title = entry.ownerEmail === me.email ? `Edit ${kindLabel}` : `Edit ${nameFor(entry.ownerEmail)}'s ${kindLabel}`;
   openDialog(title, body, [
     dialogButton(changesNeedReview() ? "Send for review" : "Save", "primary", async () => {
       const updated = { ...withoutId(entry), days: days.read(), ...times.read() };
@@ -1089,7 +1203,7 @@ function openNewConflictDialog(iso, start, end) {
   repeat.addEventListener("change", update);
   update();
 
-  openDialog("Add a time you can't be in the lab", [
+  openDialog("Add a Time You Can't Be in the Lab", [
     labeled("Repeats", repeat),
     daysField,
     times.node,
@@ -1146,7 +1260,7 @@ function openTimeOffDialog(block) {
     }));
   }
   actions.push(closeButton());
-  openDialog("Time off", body, actions);
+  openDialog("Time Off", body, actions);
 }
 
 function openRequestDialog(requestId) {
@@ -1162,7 +1276,7 @@ function openRequestDialog(requestId) {
   }
   if (isReviewer()) actions.push(dialogButton("Review requests", "primary", async () => openReviewTab()));
   actions.push(closeButton());
-  openDialog("Change waiting for review", [el("p", "", `${nameFor(request.ownerEmail)}: ${request.summary}`)], actions);
+  openDialog("Change Waiting for Review", [el("p", "", `${nameFor(request.ownerEmail)}: ${request.summary}`)], actions);
 }
 
 function openReviewTab() {
@@ -1202,32 +1316,26 @@ function shiftClock(time, minutes) {
   return time ? minutesToTime(toMinutes(time) + minutes) : time;
 }
 
-// Moving the lab portion moves its phlebotomy and Wet Lab times with it, so the staffing stays in step.
-async function saveSlot(appointment, kind, slot) {
-  await Store.saveAppointment(appointment, appointmentData(appointment, { [kind]: slot }));
-  const doc = staffingFor(appointment);
-  if (doc && kind === "lab" && doc.lab && appointment.lab) {
-    const delta = toMinutes(slot.start) - toMinutes(appointment.lab.start);
-    if (delta) {
-      await Store.saveStaffing(doc.visitKey, {
-        ...withoutId(doc),
-        lab: { ...doc.lab, phlebotomyAt: shiftClock(doc.lab.phlebotomyAt, delta), wetLabStart: shiftClock(doc.lab.wetLabStart, delta) },
-      });
-    }
-  }
-  pingSync();
-  await refresh();
-}
-
 async function setBooking(appointment, status, requestedStart = "") {
   await Store.bookVisit(appointment, bookingFields(status, requestedStart));
   pingSync();
   await refresh();
 }
 
+// Cancelling a booking opens the slot again for rebooking, and lab managers are emailed.
+async function cancelBooking(appointment) {
+  await confirmEmails("Cancel Booking", [cancellationGroup(appointment.date, appointment, "rebooking")]);
+  await setBooking(appointment, "rebooking");
+}
+
 // Cancelling a visit also removes its staffing, which takes it off the Confirmed Visits calendar.
 async function cancelAppointment(appointment) {
-  if (staffingFor(appointment)) await Store.deleteStaffing(visitKey(appointment));
+  const doc = staffingFor(appointment);
+  await confirmEmails("Cancel Visit", [
+    cancellationGroup(appointment.date, appointment, "cancelled"),
+    staffGroup(appointment.date, visitKey(appointment), { appointment, doc }, {}),
+  ]);
+  if (doc) await Store.deleteStaffing(visitKey(appointment));
   if (appointment.defaultFor) await Store.saveAppointment(appointment, appointmentData(appointment, { cancelled: true }));
   else await Store.deleteAppointment(appointment.id);
   pingSync();
@@ -1238,112 +1346,16 @@ async function cancelAppointment(appointment) {
 async function cancelSlot(appointment, kind) {
   const other = kind === "lab" ? "scan" : "lab";
   if (!appointment[other]) return cancelAppointment(appointment);
-  await Store.saveAppointment(appointment, appointmentData(appointment, { [kind]: null }));
   const doc = staffingFor(appointment);
+  const remaining = { ...appointment, [kind]: null };
+  await confirmEmails(`Cancel ${kind === "lab" ? "Lab Portion" : "Scan"}`, [
+    staffGroup(appointment.date, visitKey(appointment), { appointment, doc }, { appointment: remaining, doc: doc && { ...doc, [kind]: null } }),
+  ]);
+  await Store.saveAppointment(appointment, appointmentData(appointment, { [kind]: null }));
   if (doc) await Store.saveStaffing(doc.visitKey, { ...withoutId(doc), [kind]: null });
   pingSync();
   await refresh();
   return `${SLOT_TITLES[kind]} cancelled.`;
-}
-
-function openSlotDialog(iso, appointment, kind) {
-  const slot = appointment[kind];
-  const result = evaluateSlot(iso, appointment, kind);
-  const times = timeRange(slot.start, slot.end);
-  const number = visitNumber(iso, appointment);
-  const parts = visitPartsLabel(appointment);
-  const body = [
-    el("p", "muted", `${formatIsoWithDay(iso)} · ${number ? `Visit ${number}, ` : "Visit "}${visitTimesText(appointment)}${parts ? ` · ${parts}` : ""}`),
-    ...unusualNotice(appointment, kind),
-    times.node,
-  ];
-  let wandingBox = null;
-  if (kind === "scan") {
-    wandingBox = el("input");
-    wandingBox.type = "checkbox";
-    wandingBox.checked = slot.wandingRequired !== false;
-    const label = el("label", "check-field");
-    label.append(wandingBox, "Wanding/taping required");
-    body.push(label, el("p", "muted", "Only turn this off for the rare visits that don't need it."));
-    if (isOffHours(iso, slot.start, slot.end)) {
-      body.push(el("p", "notice", "This scan is outside regular hours (weekdays 8 AM–5 PM), so someone with Level 2 Scanning is required."));
-    }
-  }
-  const state = staffingState(result);
-  if (state === "problem") {
-    const issues = el("div", "slot-issues");
-    issues.append(el("strong", "", "Can't be fully staffed:"));
-    for (const problem of result.problems) issues.append(el("div", "", problem));
-    body.push(issues);
-  } else if (state === "tight" && result.tight) {
-    const tight = el("div", "slot-tight-box");
-    tight.append(el("strong", "", "Tight timing: "), result.timing);
-    body.push(tight);
-  }
-  if (state !== "problem") {
-    for (const warning of result.warnings || []) {
-      const box = el("div", "slot-tight-box");
-      box.append(el("strong", "", "Warning: "), warning);
-      body.push(box);
-    }
-  }
-  if (state === "ready") {
-    body.push(el("p", "slot-ok", "Ready to staff: every requirement can be met."));
-  }
-  for (const group of result.groups) {
-    const section = el("div", "staff-group");
-    section.append(el("h3", "", `${group.label}${group.label.endsWith("Available") ? "" : " Available"}:`));
-    section.append(el("p", group.people.length ? "" : "muted", group.people.map(personLabel).join(", ") || "No one"));
-    body.push(section);
-  }
-  if ((result.notes || []).length) {
-    const notes = el("div", "staff-notes");
-    notes.append(el("h3", "", "Limited availability:"));
-    for (const note of result.notes) notes.append(el("p", "", `*${note}`));
-    body.push(notes);
-  }
-  if (kind === "lab") {
-    body.push(el("p", "muted", "Dry Lab needs someone for the whole slot. Phlebotomy needs 30 minutes at any point in the slot. Wet Lab needs 2 hours starting within 30 minutes after phlebotomy ends, and can run past the slot. Wet Lab and Dry Lab must be different people. Without an Experienced Phlebotomist the visit gets a warning, and with only a Training Phlebotomist it needs mobile phlebotomy booked in advance."));
-  }
-  body.push(el("p", "muted", "A lab manager needs to be free for the whole visit, handing off if needed, and at the very least for the wrap-up after the scan."));
-  if (showsBooking(iso, appointment)) body.push(bookingSummary(appointment));
-  body.push(staffingSummary(iso, appointment));
-
-  const other = kind === "lab" ? "scan" : "lab";
-  const doc = staffingFor(appointment);
-  const actions = [
-    dialogButton("Save", "primary", async () => {
-      await saveSlot(appointment, kind, { ...slot, ...times.read(), ...(wandingBox ? { wandingRequired: wandingBox.checked } : {}) });
-      return "Saved.";
-    }),
-    switchButton(doc ? "Change staffing" : "Staff this visit", "secondary", () => openStaffingDialog(iso, appointment)),
-  ];
-  if (appointment.booking === "booked") {
-    actions.push(dialogButton("Cancel booking", "secondary", async () => {
-      await setBooking(appointment, "rebooking");
-      return "Booking cancelled. The visit stays open for rebooking.";
-    }));
-  } else {
-    actions.push(dialogButton("Mark booked", "secondary", async () => {
-      await setBooking(appointment, "booked");
-      return "Visit marked booked.";
-    }));
-  }
-  if (!appointment[other]) {
-    actions.push(dialogButton(`Add ${other === "lab" ? "lab portion" : "scan"}`, "secondary", async () => {
-      await saveSlot(appointment, other, { ...DEFAULT_SLOTS[other] });
-      return `${SLOT_TITLES[other]} added.`;
-    }));
-  }
-  const which = number ? `visit ${number}` : "this visit";
-  if (appointment[other]) {
-    actions.push(confirmingButton(`Cancel ${kind === "lab" ? "lab portion" : "scan"} only`, "Click again to cancel it", "secondary danger", () => cancelSlot(appointment, kind)));
-  }
-  actions.push(
-    confirmingButton(number ? `Cancel visit ${number}` : "Cancel visit", `Click again to cancel ${which}`, "secondary danger", () => cancelAppointment(appointment)),
-    closeButton(),
-  );
-  openDialog(`${number ? `Visit ${number} · ` : ""}${SLOT_TITLES[kind]}`, body, actions);
 }
 
 // Links in emails end in #visit=<key>, which opens that visit on the Lab Calendar.
@@ -1358,12 +1370,6 @@ function openVisitFromLink(key) {
   showPage("calendar");
   goTo(new Date(y, month - 1, day));
   openLabCalendarDialog(date, appointment);
-}
-
-function bookingSummary(appointment) {
-  const line = el("p", `booking-line booking-${appointment.booking || "open"}`);
-  line.append(el("strong", "", "Booking: "), bookingLabel(appointment));
-  return line;
 }
 
 function staffingSummary(iso, appointment) {
@@ -1388,15 +1394,154 @@ function staffingSummary(iso, appointment) {
   return box;
 }
 
+// --- Who's emailed about an action ---
+// Before anything that sends an email, a pop-up lists who'll get it. People can be left off, every email skipped, or
+// a message added. The choices are saved (emailChoices) before the change itself, so the Apps Script has them when it
+// sends. A group is { kind, ref, label, recipients: [{ email, name }], off }: `kind` and `ref` say which of the Apps
+// Script's emails it is, and `off` explains when those emails are switched off for now.
+
+function reviewerList() {
+  return isReviewer() ? members.filter((member) => member.role === "reviewer") : reviewerContacts;
+}
+
+// The reviewers the Apps Script emails about `kind`: those who haven't turned it off, other than `owner`, who did it.
+function reviewersFor(kind, owner) {
+  return reviewerList().filter((member) => wantsEmail(member, kind) && member.email !== owner)
+    .map((member) => ({ email: member.email, name: member.name }));
+}
+
+function emailChoiceId(kind, ref) {
+  return `${kind}__${ref}`.replace(/\//g, "_");
+}
+
+// Resolves with the choices to save, or null if the person went back.
+function askEmails(title, groups) {
+  const shown = groups.filter((group) => group.recipients.length);
+  if (!shown.length) return Promise.resolve([]);
+  const dialog = document.getElementById("email-dialog");
+  const body = document.getElementById("email-dialog-body");
+  const actions = document.getElementById("email-dialog-actions");
+  document.getElementById("email-dialog-title").textContent = title;
+  return new Promise((resolve) => {
+    const boxes = [];
+    const nodes = [el("p", "", "This sends an email notification. Untick anyone who shouldn't get it.")];
+    for (const group of shown) {
+      const section = el("div", "email-group");
+      section.append(el("h3", "", group.label));
+      if (group.off) section.append(el("p", "notice", group.off));
+      for (const person of group.recipients) {
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = true;
+        const label = el("label", "check-field");
+        label.append(box, `${person.name} (${person.email})`);
+        section.append(label);
+        boxes.push({ group, person, box });
+      }
+      nodes.push(section);
+    }
+    const noneBox = el("input");
+    noneBox.type = "checkbox";
+    const noneLabel = el("label", "check-field email-none");
+    noneLabel.append(noneBox, "Don't send any email notifications");
+    noneBox.addEventListener("change", () => {
+      for (const { box } of boxes) box.disabled = noneBox.checked;
+    });
+    const message = el("textarea", "email-message");
+    message.maxLength = 1000;
+    message.rows = 3;
+    message.placeholder = "Optional. It's added to the email.";
+    nodes.push(noneLabel, labeled("Add a message", message));
+    body.replaceChildren(...nodes);
+    const finish = (value) => {
+      dialog.close();
+      resolve(value);
+    };
+    const go = el("button", "primary", "Continue");
+    go.type = "button";
+    go.addEventListener("click", () => {
+      const text = message.value.trim();
+      finish(shown.map((group) => {
+        const skip = boxes.filter((item) => item.group === group && !item.box.checked).map((item) => item.person.email);
+        return { kind: group.kind, ref: group.ref, skip, none: noneBox.checked || skip.length === group.recipients.length, message: text };
+      }).filter((choice) => choice.none || choice.skip.length || choice.message));
+    });
+    const back = el("button", "secondary", "Go back");
+    back.type = "button";
+    back.addEventListener("click", () => finish(null));
+    dialog.onclose = () => resolve(null);
+    actions.replaceChildren(go, back);
+    dialog.showModal();
+  });
+}
+
+// Shows the pop-up, then saves what was chosen. Going back stops the action with "Nothing was changed."
+async function confirmEmails(title, groups) {
+  const choices = await askEmails(title, groups);
+  if (!choices) {
+    const stop = new Error("Nothing was changed.");
+    stop.calledOff = true;
+    throw stop;
+  }
+  for (const choice of choices) {
+    await Store.saveEmailChoice(emailChoiceId(choice.kind, choice.ref), {
+      ...choice,
+      by: me.email,
+      byName: me.name,
+      createdAt: new Date().toISOString(),
+    });
+  }
+}
+
+const STAFF_EMAILS_OFF = "Staff emails are switched off while the system is being set up, so nothing will actually be sent to them yet.";
+
+// What each staff member is doing on a visit, so a change can be told apart from no change.
+function staffDuties(appointment, doc) {
+  const duties = {};
+  if (!appointment || !doc) return duties;
+  for (const role of staffRoles(appointment, doc)) (duties[role.email] = duties[role.email] || []).push(`${role.role} ${role.from}-${role.to}`);
+  return duties;
+}
+
+// The staff a change to a visit or its staffing emails: anyone whose roles or times change, is added or is taken off.
+function staffGroup(iso, key, before, after) {
+  if (iso < dateToIso(startOfDay(new Date()))) return { kind: "staff", ref: key, label: "Staff", recipients: [] };
+  const was = staffDuties(before.appointment, before.doc);
+  const now = staffDuties(after.appointment, after.doc);
+  const emails = [...new Set([...Object.keys(was), ...Object.keys(now)])]
+    .filter((email) => (was[email] || []).join("|") !== (now[email] || []).join("|"));
+  return {
+    kind: "staff",
+    ref: key,
+    label: "Staff on this visit",
+    recipients: emails.map((email) => ({ email, name: nameFor(email) })),
+    off: EMAIL_SWITCHES.staff ? "" : STAFF_EMAILS_OFF,
+  };
+}
+
+// Lab managers hear about a cancelled booking, or a cancelled visit that was booked or staffed, if it's upcoming.
+function cancellationGroup(iso, appointment, type) {
+  const upcoming = iso >= dateToIso(startOfDay(new Date()));
+  const watched = appointment.booking || staffingFor(appointment);
+  const owner = type === "rebooking" ? appointment.bookedBy : null;
+  return {
+    kind: "cancellations",
+    ref: `${visitKey(appointment)}:${type}`,
+    label: "Lab managers",
+    recipients: upcoming && watched ? reviewersFor("cancellations", owner) : [],
+  };
+}
+
 // --- Staffing a visit ---
 
+// With mobilePhlebotomy, mobile phlebotomy is booked and no one from the lab does phlebotomy.
 function emptyLab() {
-  return { dryLab: null, phlebotomy: null, phlebotomyAt: null, wetLab: null, wetLabStart: null };
+  return { dryLab: null, phlebotomy: null, phlebotomyAt: null, wetLab: null, wetLabStart: null, mobilePhlebotomy: false };
 }
 
 function labFromOption(option) {
   if (!option) return emptyLab();
-  return { dryLab: option.dryLab, phlebotomy: option.phlebotomy, phlebotomyAt: option.phlebotomyAt, wetLab: option.wetLab, wetLabStart: option.wetLabStart };
+  return { dryLab: option.dryLab, phlebotomy: option.phlebotomy, phlebotomyAt: option.phlebotomyAt, wetLab: option.wetLab, wetLabStart: option.wetLabStart, mobilePhlebotomy: false };
 }
 
 function scanFromOption(option) {
@@ -1470,14 +1615,17 @@ function openStaffingDialog(iso, appointment) {
     return labeled(label, select);
   };
 
-  // Changing who does phlebotomy or Wet Lab works out the best timing for the new pair.
+  // Changing who does phlebotomy or Wet Lab works out the best timing for the new pair. With mobile phlebotomy, or a
+  // lab portion without phlebotomy, only Wet Lab's own time matters.
+  const needs = labNeeds(appointment.lab);
   const retime = () => {
-    const phlebotomist = byEmail.get(draft.lab.phlebotomy);
+    const ownPhlebotomist = needs.phlebotomy && !draft.lab.mobilePhlebotomy;
+    const phlebotomist = ownPhlebotomist ? byEmail.get(draft.lab.phlebotomy) : null;
     const wetLabber = byEmail.get(draft.lab.wetLab);
-    if (!phlebotomist || !wetLabber) return;
+    if (!wetLabber || (ownPhlebotomist && !phlebotomist)) return;
     const timing = labTiming(appointment.lab, phlebotomist, wetLabber);
     if (timing) {
-      draft.lab.phlebotomyAt = minutesToTime(timing.phlebotomyAt);
+      draft.lab.phlebotomyAt = needs.phlebotomy ? minutesToTime(timing.phlebotomyAt) : null;
       draft.lab.wetLabStart = minutesToTime(timing.wetStart);
     }
   };
@@ -1501,27 +1649,53 @@ function openStaffingDialog(iso, appointment) {
 
   const render = () => {
     const body = [
-      el("p", "muted", `${formatIsoWithDay(iso)} · Visit ${visitTimesText(appointment)} · ${partsText(appointment)}`),
+      el("p", "muted", `${formatIsoWithDay(iso)} · Visit ${visitTimesText(appointment)} · ${partsText(appointment)}${visitPartsLabel(appointment) ? ` · ${visitPartsLabel(appointment)}` : ""}`),
       el("p", "muted", "Suggestions use the most experienced phlebotomist available, then favor whoever has the fewest visits within four weeks. Pick another option, or change any role below."),
+      visitAvailability(iso, appointment, false),
     ];
     if (draft.lab) {
       const section = el("div", "staff-section");
-      section.append(el("h3", "", `Lab portion, ${formatTime(appointment.lab.start)} – ${formatTime(appointment.lab.end)}`), ...unusualNotice(appointment, "lab"));
-      section.append(optionList(options.lab,
-        (choice) => `Dry Lab: ${nameOf(choice.dryLab)} · Phlebotomy: ${nameOf(choice.phlebotomy)}${tagOf(byEmail.get(choice.phlebotomy))} at ${formatTime(choice.phlebotomyAt)} · Wet Lab: ${nameOf(choice.wetLab)} from ${formatTime(choice.wetLabStart)}${choice.standard ? "" : " (tight timing)"}`,
-        (choice) => choice.dryLab === draft.lab.dryLab && choice.phlebotomy === draft.lab.phlebotomy && choice.wetLab === draft.lab.wetLab,
+      section.append(el("h3", "", `Lab Portion, ${formatTime(appointment.lab.start)} – ${formatTime(appointment.lab.end)}`), ...unusualNotice(appointment, "lab"));
+      const describeLab = (choice) => [
+        needs.dryLab ? `Dry Lab: ${nameOf(choice.dryLab)}` : "",
+        needs.phlebotomy ? `Phlebotomy: ${nameOf(choice.phlebotomy)}${tagOf(byEmail.get(choice.phlebotomy))} at ${formatTime(choice.phlebotomyAt)}` : "",
+        `Wet Lab: ${nameOf(choice.wetLab)} from ${formatTime(choice.wetLabStart)}${choice.standard ? "" : " (tight timing)"}`,
+      ].filter(Boolean).join(" · ");
+      section.append(optionList(options.lab, describeLab,
+        (choice) => choice.dryLab === draft.lab.dryLab && choice.phlebotomy === draft.lab.phlebotomy && choice.wetLab === draft.lab.wetLab && !draft.lab.mobilePhlebotomy,
         (choice) => Object.assign(draft.lab, labFromOption(choice))));
       const row = el("div", "field-row");
-      row.append(
-        personSelect("Dry Lab", draft.lab.dryLab, candidates.dryLab, (email) => { draft.lab.dryLab = email; }),
-        personSelect("Phlebotomy", draft.lab.phlebotomy, candidates.phlebotomy, (email) => { draft.lab.phlebotomy = email; retime(); }, { showLevel: true }),
-        personSelect("Wet Lab", draft.lab.wetLab, candidates.wetLab, (email) => { draft.lab.wetLab = email; retime(); }),
-      );
+      if (needs.dryLab) row.append(personSelect("Dry Lab", draft.lab.dryLab, candidates.dryLab, (email) => { draft.lab.dryLab = email; }));
+      if (needs.phlebotomy && !draft.lab.mobilePhlebotomy) {
+        row.append(personSelect("Phlebotomy", draft.lab.phlebotomy, candidates.phlebotomy, (email) => { draft.lab.phlebotomy = email; retime(); }, { showLevel: true }));
+      }
+      row.append(personSelect("Wet Lab", draft.lab.wetLab, candidates.wetLab, (email) => { draft.lab.wetLab = email; retime(); }));
       section.append(row);
-      if (draft.lab.phlebotomyAt) {
-        const at = toMinutes(draft.lab.phlebotomyAt);
+      // Mobile phlebotomy takes the place of a phlebotomist from the lab.
+      if (needs.phlebotomy) {
+        const mobile = el("input");
+        mobile.type = "checkbox";
+        mobile.checked = Boolean(draft.lab.mobilePhlebotomy);
+        mobile.addEventListener("change", () => {
+          draft.lab.mobilePhlebotomy = mobile.checked;
+          if (mobile.checked) draft.lab.phlebotomy = null;
+          if (!draft.lab.phlebotomyAt) draft.lab.phlebotomyAt = appointment.lab.start;
+          retime();
+          render();
+        });
+        const label = el("label", "check-field");
+        label.append(mobile, "Mobile Phlebotomy is booked");
+        section.append(label);
+      }
+      if (draft.lab.wetLabStart) {
         const wet = toMinutes(draft.lab.wetLabStart);
-        section.append(el("p", "muted", `Phlebotomy ${clockTime(at)} – ${clockTime(at + PHLEBOTOMY_MINUTES)} · Wet Lab ${clockTime(wet)} – ${clockTime(wet + WET_LAB_MINUTES)}`));
+        const wetText = `Wet Lab ${clockTime(wet)} – ${clockTime(wet + WET_LAB_MINUTES)}`;
+        if (needs.phlebotomy && draft.lab.phlebotomyAt) {
+          const at = toMinutes(draft.lab.phlebotomyAt);
+          section.append(el("p", "muted", `${draft.lab.mobilePhlebotomy ? "Mobile phlebotomy" : "Phlebotomy"} ${clockTime(at)} – ${clockTime(at + PHLEBOTOMY_MINUTES)} · ${wetText}`));
+        } else {
+          section.append(el("p", "muted", wetText));
+        }
       }
       body.push(section);
     }
@@ -1544,7 +1718,7 @@ function openStaffingDialog(iso, appointment) {
       body.push(section);
     }
     const managerSection = el("div", "staff-section");
-    managerSection.append(el("h3", "", `Lab manager, ${clockTime(window.start)} – ${clockTime(window.end)}`));
+    managerSection.append(el("h3", "", `Lab Manager, ${clockTime(window.start)} – ${clockTime(window.end)}`));
     managerSection.append(optionList(options.managers,
       (choice) => `${choice.managers.map(nameOf).join(" and ")}${choice.coverage === "whole" ? (choice.managers.length > 1 ? " (handing off)" : " (whole visit)") : " (wrap-up only)"}`,
       (choice) => choice.managers.join("|") === draft.managers.filter(Boolean).join("|"),
@@ -1570,7 +1744,7 @@ function openStaffingDialog(iso, appointment) {
 
     const actions = [
       dialogButton(check.issues.length ? "Approve anyway" : "Approve staffing", "primary", async () => {
-        await Store.saveStaffing(key, {
+        const doc = {
           date: iso,
           visitKey: key,
           lab: draft.lab,
@@ -1578,15 +1752,18 @@ function openStaffingDialog(iso, appointment) {
           managers: draft.managers.filter(Boolean),
           approvedBy: me.email,
           approvedAt: new Date().toISOString(),
-        });
+        };
+        await confirmEmails("Approve Staffing", [staffGroup(iso, key, { appointment, doc: saved }, { appointment, doc })]);
+        await Store.saveStaffing(key, doc);
         pingSync();
         await refresh();
         return "Staffing approved. It'll be on the Confirmed Visits calendar within about 10 minutes.";
       }),
-      switchButton("Back to visit", "secondary", () => openSlotDialog(iso, appointment, appointment.lab ? "lab" : "scan")),
+      switchButton("Back to visit", "secondary", () => openLabCalendarDialog(iso, freshVisit(iso, appointment))),
     ];
     if (saved) {
       actions.push(confirmingButton("Remove staffing", "Click again to remove it", "secondary danger", async () => {
+        await confirmEmails("Remove Staffing", [staffGroup(iso, key, { appointment, doc: saved }, {})]);
         await Store.deleteStaffing(key);
         pingSync();
         await refresh();
@@ -1594,7 +1771,7 @@ function openStaffingDialog(iso, appointment) {
       }));
     }
     actions.push(closeButton());
-    openDialog("Staff this visit", body, actions);
+    openDialog("Staff This Visit", body, actions);
   };
   render();
 }
@@ -1607,7 +1784,7 @@ function openNewVisitDialog(iso, start, end) {
   choice.append(el("legend", "", "What kind of visit?"));
   const kinds = [
     ["full", "Full visit: lab portion, then scan (4 hours from the start)"],
-    ["lab", "Lab portion only"],
+    ...LAB_ONLY_KINDS.map((kind) => [kind.key, kind.label]),
     ["scan", "Scan only"],
   ];
   const radios = kinds.map(([value, text], index) => {
@@ -1627,7 +1804,7 @@ function openNewVisitDialog(iso, start, end) {
   const confirmedLabel = el("label", "check-field");
   confirmedLabel.append(confirmedBox, "Confirmed booking");
   const help = el("p", "muted", "For a full visit, only the start time is used: the lab portion runs 2 hours from it and the scan the 2 hours after. Change either part afterwards if needed. Each visit is separate, so cancelling one never cancels another visit on the same day.");
-  openDialog("Add a participant visit", [el("p", "muted", formatIsoWithDay(iso)), choice, times.node, confirmedLabel, help], [
+  openDialog("Add a Participant Visit", [el("p", "muted", formatIsoWithDay(iso)), choice, times.node, confirmedLabel, help], [
     dialogButton("Add visit", "primary", async () => {
       const kind = radios.find((radio) => radio.checked).value;
       const range = times.read();
@@ -1637,8 +1814,8 @@ function openNewVisitDialog(iso, start, end) {
         const from = toMinutes(range.start);
         lab = { start: range.start, end: minutesToTime(from + 120) };
         scan = { start: minutesToTime(from + 120), end: minutesToTime(from + 240), wandingRequired: true };
-      } else if (kind === "lab") {
-        lab = range;
+      } else if (kind !== "scan") {
+        lab = { ...range, roles: LAB_ONLY_KINDS.find((item) => item.key === kind).roles };
       } else {
         scan = { ...range, wandingRequired: true };
       }
@@ -1821,7 +1998,7 @@ async function saveProfileForm() {
 // --- The lab directory ---
 
 const DIRECTORY_TABS = [
-  { key: "all", label: "Whole lab", titles: null },
+  { key: "all", label: "Whole Lab", titles: null },
   { key: "ra", label: "RAs", titles: ["RA"] },
   { key: "phd", label: "PhD Students", titles: ["PhD Student"] },
   { key: "postdoc", label: "Post-Docs", titles: ["Post-Doc"] },
@@ -2177,16 +2354,127 @@ async function saveWebsiteData(which) {
 // --- Availability Checker ---
 // Lets lab managers check anyone's availability at any time, by role, and test times as a visit.
 
-const CHECK_ROLES = [
-  ["Lab managers", (person) => person.role === "reviewer"],
-  ...["Dry Lab", "Wet Lab", ...PHLEBOTOMY_LEVELS, "Level 2 Scanning", "Level 1 Scanning", "Auxiliary Support Scanning", "Wanding/Taping"]
-    .map((skill) => [skill, (person) => person.skills.includes(skill)]),
+// The five groups, each with its own color. A group's subgroups are its levels; someone in more than one of a group's
+// subgroups counts once toward the group.
+const CHECK_GROUPS = [
+  { key: "managers", label: "Lab Managers", subgroups: [] },
+  { key: "phlebotomy", label: "Phlebotomists", subgroups: PHLEBOTOMY_LEVELS },
+  { key: "wet", label: "Wet Lab", subgroups: [] },
+  { key: "dry", label: "Dry Lab", subgroups: [] },
+  { key: "scanning", label: "Scanners", subgroups: ["Level 2 Scanning", "Level 1 Scanning", "Auxiliary Support Scanning", "Wanding/Taping"] },
 ];
+const CHECK_GROUP_MEMBERSHIP = {
+  managers: (person) => person.role === "reviewer",
+  wet: (person) => person.skills.includes("Wet Lab"),
+  dry: (person) => person.skills.includes("Dry Lab"),
+};
+// What's ticked in the filters, and which groups are expanded, kept while the checker is re-drawn.
+const checkShown = new Set(CHECK_GROUPS.flatMap((group) => [group.key, ...group.subgroups]));
+const checkExpanded = new Set();
+
+function groupMembers(group, people) {
+  if (!group.subgroups.length) return people.filter(CHECK_GROUP_MEMBERSHIP[group.key]);
+  const subgroups = group.subgroups.filter((name) => checkShown.has(name));
+  return people.filter((person) => subgroups.some((name) => person.skills.includes(name)));
+}
+
+// The group checkboxes, each with its subgroups' checkboxes showing underneath while it's ticked. Built once.
+function renderCheckFilters() {
+  const holder = document.getElementById("check-filters");
+  if (holder.children.length) return;
+  const box = (name, label, className, subs) => {
+    const field = el("label", `check-field ${className}`);
+    const input = el("input");
+    input.type = "checkbox";
+    input.checked = checkShown.has(name);
+    input.addEventListener("change", () => {
+      if (input.checked) checkShown.add(name);
+      else checkShown.delete(name);
+      if (subs) subs.hidden = !input.checked;
+      renderAvailabilityCheck();
+    });
+    field.append(input, label);
+    return field;
+  };
+  holder.append(el("strong", "check-filters-title", "Show"));
+  for (const group of CHECK_GROUPS) {
+    const node = el("div", `check-filter group-${group.key}`);
+    const subs = group.subgroups.length ? el("div", "check-filter-subs") : null;
+    node.append(box(group.key, group.label, "check-filter-group", subs));
+    if (subs) {
+      subs.hidden = !checkShown.has(group.key);
+      for (const name of group.subgroups) subs.append(box(name, name, "check-filter-sub"));
+      node.append(subs);
+    }
+    holder.append(node);
+  }
+}
+
+// When someone busy at a time is next free that day, if they are.
+function nextFreeText(person, at) {
+  const [stretch] = freeIntervals(person, at, 22 * 60);
+  return stretch ? `free from ${clockTime(stretch[0])}` : "not free again today";
+}
+
+// One person's line under an expanded group: free, partly free (with when), or busy.
+function checkPeopleRows(people, from, to, at) {
+  const free = [];
+  const part = [];
+  const busy = [];
+  for (const person of people) {
+    if (at) (freeBetween(person, at, at + 1) ? free : busy).push(person);
+    else if (freeBetween(person, from, to)) free.push(person);
+    else if (freeStretches(person, from, to).length) part.push(person);
+    else busy.push(person);
+  }
+  const rows = [];
+  const line = (className, label, text) => {
+    const row = el("div", `check-people ${className}`);
+    row.append(el("span", "check-people-label", label), el("span", "", text));
+    rows.push(row);
+  };
+  if (!people.length) line("muted", "", "No one has this training.");
+  if (free.length) line("", at ? "Free:" : "Free the whole time:", free.map((person) => person.name).join(", "));
+  if (part.length) line("muted", "Free part of the time:", part.map((person) => `${person.name} (${freeStretches(person, from, to).join(", ")})`).join("; "));
+  if (busy.length) line("muted", "Not free:", busy.map((person) => at ? `${person.name} (${nextFreeText(person, at)})` : person.name).join(", "));
+  return { rows, free: free.length, part: part.length, total: people.length };
+}
+
+function checkGroupCard(group, people, from, to, at) {
+  const members = groupMembers(group, people);
+  const summary = checkPeopleRows(members, from, to, at);
+  const card = el("details", `check-group group-${group.key}`);
+  card.open = checkExpanded.has(group.key);
+  card.addEventListener("toggle", () => {
+    if (card.open) checkExpanded.add(group.key);
+    else checkExpanded.delete(group.key);
+  });
+  const head = el("summary", "check-group-head");
+  const state = summary.free ? "check-count-ok" : summary.part ? "check-count-part" : "check-count-none";
+  const counts = el("span", `check-count ${state}`, `${summary.free} of ${summary.total} free${at ? "" : " the whole time"}`);
+  head.append(el("span", "check-group-dot"), el("strong", "", group.label), counts);
+  if (summary.part) head.append(el("span", "check-count-extra muted", `+${summary.part} part of the time`));
+  card.append(head);
+  const body = el("div", "check-group-body");
+  if (group.subgroups.length) {
+    for (const name of group.subgroups.filter((sub) => checkShown.has(sub))) {
+      const sub = checkPeopleRows(people.filter((person) => person.skills.includes(name)), from, to, at);
+      const node = el("div", "check-subgroup");
+      node.append(el("div", "check-subgroup-head", sub.total ? `${name} · ${sub.free} of ${sub.total} free` : name), ...sub.rows);
+      body.append(node);
+    }
+    if (!body.children.length) body.append(el("p", "muted", "Tick a level above to see it."));
+  } else {
+    body.append(...summary.rows);
+  }
+  card.append(body);
+  return card;
+}
 
 function checkPartBox(title, result) {
   const state = staffingState(result);
   const box = el("div", state === "problem" ? "slot-issues" : state === "tight" ? "slot-tight-box" : "check-ok");
-  box.append(el("strong", "", `${title}: ${state === "problem" ? "can't be fully staffed" : state === "tight" ? "can be staffed, with care" : "ready to staff"}`));
+  box.append(el("strong", "", `${title}: ${state === "problem" ? "can't be fully staffed" : state === "tight" ? "can be staffed, with care" : "able to be staffed"}`));
   for (const problem of result.problems) box.append(el("div", "", problem));
   if (result.tight) box.append(el("div", "", `Tight timing: ${result.timing}`));
   for (const warning of result.warnings || []) box.append(el("div", "", `Warning: ${warning}`));
@@ -2197,17 +2485,23 @@ function renderAvailabilityCheck() {
   if (!isReviewer()) return;
   const dateInput = document.getElementById("check-date");
   if (!dateInput.value) dateInput.value = dateToIso(startOfDay(new Date()));
+  renderCheckFilters();
   const iso = dateInput.value;
+  // At a specific time there's no range to test as a visit, so only who's free is shown.
+  const atTime = document.getElementById("check-mode").value === "at";
+  document.getElementById("check-start-label").textContent = atTime ? "At" : "From";
+  document.getElementById("check-end-field").hidden = atTime;
+  document.getElementById("check-kind-field").hidden = atTime;
   const start = document.getElementById("check-start").value;
   const end = document.getElementById("check-end").value;
-  const kind = document.getElementById("check-kind").value;
+  const kind = atTime ? "any" : document.getElementById("check-kind").value;
   const out = document.getElementById("check-results");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || !validTime(start) || (kind !== "full" && (!validTime(end) || end <= start))) {
-    out.replaceChildren(el("p", "muted", "Pick a date and a start time, with an end time after it."));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || !validTime(start) || (!atTime && kind !== "full" && (!validTime(end) || end <= start))) {
+    out.replaceChildren(el("p", "muted", atTime ? "Pick a date and a time." : "Pick a date and a start time, with an end time after it."));
     return;
   }
   const data = staffingData();
-  const nodes = [el("h3", "", `${formatIsoWithDay(iso)}, ${formatTime(start)}${kind === "full" ? "" : ` – ${formatTime(end)}`}`)];
+  const nodes = [el("h3", "", `${formatIsoWithDay(iso)}, ${atTime ? `at ${formatTime(start)}` : `${formatTime(start)}${kind === "full" ? "" : ` – ${formatTime(end)}`}`}`)];
   const holiday = staffHolidayOn(iso, staffHolidays);
   if (holiday) nodes.push(el("p", "notice", `${holiday.name} is a USC staff holiday, so there are no visits that day.`));
   let from = toMinutes(start);
@@ -2222,27 +2516,23 @@ function renderAvailabilityCheck() {
     if (kind === "full") nodes.push(el("p", "muted", `A full visit runs 4 hours, ${clockTime(from)} – ${clockTime(to)}: the lab portion for the first 2 hours and the scan for the next 2. Until isn't used.`));
     for (const part of ["lab", "scan"].filter((name) => appointment[name])) {
       const slot = appointment[part];
-      nodes.push(checkPartBox(`${part === "lab" ? "Lab portion" : "Scan"}, ${formatTime(slot.start)} – ${formatTime(slot.end)}`, evaluateVisitPart(iso, appointment, part, data)));
+      nodes.push(checkPartBox(`${part === "lab" ? "Lab Portion" : "Scan"}, ${formatTime(slot.start)} – ${formatTime(slot.end)}`, evaluateVisitPart(iso, appointment, part, data)));
     }
   }
   const people = candidatesOn(iso, data, () => true);
-  const list = el("div", "check-roles");
-  for (const [label, hasRole] of CHECK_ROLES) {
-    const withRole = people.filter(hasRole);
-    const whole = withRole.filter((person) => freeBetween(person, from, to));
-    const part = withRole.filter((person) => !whole.includes(person) && freeStretches(person, from, to).length);
-    const row = el("div", "check-role");
-    row.append(el("strong", "", label));
-    row.append(el("div", whole.length ? "" : "muted", whole.length ? `Free the whole time: ${whole.map((person) => person.name).join(", ")}` : "No one free the whole time"));
-    if (part.length) row.append(el("div", "muted", `Free part of the time: ${part.map((person) => `${person.name} (${freeStretches(person, from, to).join(", ")})`).join("; ")}`));
-    list.append(row);
+  const groups = CHECK_GROUPS.filter((group) => checkShown.has(group.key));
+  if (groups.length) {
+    const list = el("div", "check-groups");
+    for (const group of groups) list.append(checkGroupCard(group, people, from, to, atTime ? from : null));
+    nodes.push(el("p", "muted check-hint", "Click a group to see who's free, by level."), list);
+  } else {
+    nodes.push(el("p", "muted", "Tick a group above to see its availability."));
   }
-  nodes.push(list);
   out.replaceChildren(...nodes);
 }
 
 // --- The Lab Calendar: open slots and scheduled visits ---
-// Every weekday that isn't a staff holiday has an open 9:00 AM – 1:00 PM slot, from January 2027 and up to 60 days
+// Every weekday that isn't a staff holiday has an open 9:00 AM – 1:00 PM slot, from November 5, 2026 and up to 60 days
 // ahead. Bookers book a slot; a reviewer confirms the booking, recording the scan time, and staffs it.
 
 function onLabCalendar(iso, appointment) {
@@ -2268,8 +2558,8 @@ function renderAppointmentsColumn(column, iso) {
     const node = el("div", `visit-block visit-${status}${appointment.booking === "rebooking" ? " visit-rebooking" : ""}`);
     placeBlock(node, item.start, item.end, lane, laneCount);
     const title = status === "open"
-      ? (appointment.booking === "rebooking" ? "Open slot · booking cancelled" : "Open participant slot")
-      : status === "booked" ? "BOOKED · waiting for confirmation" : `Scheduled · ${part === "lab" ? "Lab portion" : "Scan"}`;
+      ? (appointment.booking === "rebooking" ? "Open Slot · Booking Cancelled" : "Open Participant Slot")
+      : status === "booked" ? "BOOKED · Waiting for Confirmation" : `Scheduled · ${part === "lab" ? "Lab Portion" : "Scan"}`;
     node.append(el("strong", "", `${item.number ? `Visit ${item.number} · ` : ""}${title}`), el("div", "slot-time", `${formatTime(item.start)} – ${formatTime(item.end)}`));
     const chips = el("div", "slot-chips");
     if (unusualTimes(appointment, part || undefined).length) chips.append(el("span", "slot-chip chip-unusual", SEE_TIME));
@@ -2329,7 +2619,7 @@ function visitTimesEditor(appointment, startTime) {
       return visitPartsFrom(values.start, values.scanStart, values.scanEnd, wanding.checked);
     }
     if (values.end <= values.start) throw new Error("The end time must be after the start time.");
-    return appointment.lab ? { lab: { start: values.start, end: values.end }, scan: null } : { lab: null, scan: { start: values.start, end: values.end, wandingRequired: wanding.checked } };
+    return appointment.lab ? { lab: { ...appointment.lab, start: values.start, end: values.end }, scan: null } : { lab: null, scan: { start: values.start, end: values.end, wandingRequired: wanding.checked } };
   };
   const update = () => {
     try {
@@ -2350,17 +2640,16 @@ function visitTimesEditor(appointment, startTime) {
 
 // Saves new times for a visit. Moving the lab portion moves its phlebotomy and Wet Lab times with it.
 async function saveVisitTimes(appointment, parts, changes = {}) {
-  await Store.saveAppointment(appointment, appointmentData(appointment, { ...parts, ...changes }));
   const doc = staffingFor(appointment);
-  if (doc && doc.lab && appointment.lab && parts.lab) {
-    const delta = toMinutes(parts.lab.start) - toMinutes(appointment.lab.start);
-    if (delta) {
-      await Store.saveStaffing(doc.visitKey, {
-        ...withoutId(doc),
-        lab: { ...doc.lab, phlebotomyAt: shiftClock(doc.lab.phlebotomyAt, delta), wetLabStart: shiftClock(doc.lab.wetLabStart, delta) },
-      });
-    }
+  const delta = doc && doc.lab && appointment.lab && parts.lab ? toMinutes(parts.lab.start) - toMinutes(appointment.lab.start) : 0;
+  const moved = delta ? { ...withoutId(doc), lab: { ...doc.lab, phlebotomyAt: shiftClock(doc.lab.phlebotomyAt, delta), wetLabStart: shiftClock(doc.lab.wetLabStart, delta) } } : null;
+  if (doc) {
+    await confirmEmails("Change Visit Times", [
+      staffGroup(appointment.date, visitKey(appointment), { appointment, doc }, { appointment: { ...appointment, ...parts }, doc: moved || doc }),
+    ]);
   }
+  await Store.saveAppointment(appointment, appointmentData(appointment, { ...parts, ...changes }));
+  if (moved) await Store.saveStaffing(doc.visitKey, moved);
   pingSync();
   await refresh();
 }
@@ -2369,12 +2658,13 @@ function freshVisit(iso, appointment) {
   return visitsOn(iso).find((visit) => visitKey(visit) === visitKey(appointment)) || appointment;
 }
 
-// Reviewers: change an open slot's times before anyone books it.
+// Reviewers: change an open slot's times before anyone books it, with who's available for it.
 function openSlotTimesDialog(iso, appointment) {
   const times = visitTimesEditor(appointment);
   const body = [...visitHeading(iso, appointment), times.node];
   if (appointment.booking === "rebooking") body.push(el("p", "notice", `A booking for this slot was cancelled${appointment.bookedByName ? ` by ${appointment.bookedByName}` : ""}. It's open to rebook.`));
-  openDialog("Open participant slot", body, [
+  body.push(visitAvailability(iso, appointment));
+  openDialog("Open Participant Slot", body, [
     dialogButton("Save times", "primary", async () => {
       await saveVisitTimes(appointment, times.read());
       return "Slot times saved.";
@@ -2383,7 +2673,6 @@ function openSlotTimesDialog(iso, appointment) {
       await setBooking(appointment, "booked");
       return "Marked booked. Confirm it to record the scan time.";
     }),
-    switchButton("Staffing details", "secondary", () => openSlotDialog(iso, appointment, appointment.lab ? "lab" : "scan")),
     confirmingButton(visitNumber(iso, appointment) ? `Cancel visit ${visitNumber(iso, appointment)}` : "Cancel this slot", "Click again to cancel it", "secondary danger", () => cancelAppointment(appointment)),
     closeButton(),
   ]);
@@ -2397,51 +2686,63 @@ function openConfirmDialog(iso, appointment) {
   if (appointment.requestedStart) {
     body.push(el("p", "notice", `${appointment.bookedByName || "The booker"} asked to start at ${formatTime(appointment.requestedStart)} instead. It's filled in below: keep it to approve, or change it.`));
   }
-  body.push(el("h3", "", "Visit and scan times"), times.node, el("p", "muted", "Record the scan time you booked. The lab portion runs 2 hours from the start, or until the scan if that's sooner."));
-  openDialog("Confirm booking", body, [
+  body.push(el("h3", "", "Visit and Scan Times"), times.node, el("p", "muted", "Record the scan time you booked. The lab portion runs 2 hours from the start, or until the scan if that's sooner."));
+  body.push(visitAvailability(iso, appointment));
+  openDialog("Confirm Booking", body, [
     dialogButton("Confirm booking", "primary", async () => {
       await saveVisitTimes(appointment, times.read(), { confirmed: true, confirmedBy: me.email, confirmedAt: new Date().toISOString(), requestedStart: "" });
       openConfirmedReminder(iso, freshVisit(iso, appointment));
       return "";
     }),
     confirmingButton("Cancel booking", "Click again to cancel the booking", "secondary danger", async () => {
-      await setBooking(appointment, "rebooking");
+      await cancelBooking(appointment);
       return "Booking cancelled. The slot is open again.";
     }),
+    confirmingButton("Cancel visit", "Click again to cancel the visit", "secondary danger", () => cancelAppointment(appointment)),
     closeButton(),
   ]);
 }
 
 // Shown straight after confirming: participant details go on the lab's Google Calendar by hand, never on this site.
 function openConfirmedReminder(iso, appointment) {
-  openDialog("Booking confirmed", [
+  openDialog("Booking Confirmed", [
     el("p", "", `${formatIsoWithDay(iso)} · ${partsText(appointment)}`),
     el("p", "reminder-box", "Now add this appointment to the lab's appointment calendar in Google Calendar, with the participant ID and other study details. Participant information goes there only, never on this site."),
-    el("p", "muted", "Next, staff the visit. Approving the staffing sends the staff their calendar invites and emails automatically."),
+    el("p", "muted", "Next, staff the visit from the suggested staffing."),
   ], [
     switchButton("Staff this visit", "primary", () => openStaffingDialog(iso, freshVisit(iso, appointment))),
     closeButton(),
   ]);
 }
 
-// Reviewers: a confirmed visit, with its staffing.
+// Reviewers: a confirmed visit, with its staffing and who's available. Staffing, times, the booking and cancelling are
+// all done from here.
 function openScheduledDialog(iso, appointment) {
   const doc = staffingFor(appointment);
   const body = [...visitHeading(iso, appointment), el("p", "", partsText(appointment))];
   for (const note of unusualTimes(appointment)) body.push(el("p", "booking-unusual", `${SEE_TIME} ${note}`));
   body.push(el("p", "muted", `Booked by ${appointment.bookedByName || appointment.bookedBy || "a reviewer"}${appointment.confirmedBy ? `, confirmed by ${nameFor(appointment.confirmedBy)}` : ""}.`));
-  body.push(staffingSummary(iso, appointment));
-  openDialog("Scheduled visit", body, [
+  body.push(staffingSummary(iso, appointment), visitAvailability(iso, appointment, !doc));
+  const actions = [
     switchButton(doc ? "Change staffing" : "Staff this visit", "primary", () => openStaffingDialog(iso, appointment)),
     switchButton("Change times", "secondary", () => openEditScheduledDialog(iso, appointment)),
-    confirmingButton("Cancel visit", "Click again to cancel the visit", "secondary danger", () => cancelAppointment(appointment)),
-    closeButton(),
-  ]);
+    confirmingButton("Cancel booking", "Click again to cancel the booking", "secondary danger", async () => {
+      await cancelBooking(appointment);
+      return "Booking cancelled. The slot is open again for rebooking.";
+    }),
+  ];
+  if (appointment.lab && appointment.scan) {
+    for (const kind of ["lab", "scan"]) {
+      actions.push(confirmingButton(`Cancel ${kind === "lab" ? "lab portion" : "scan"} only`, "Click again to cancel it", "secondary danger", () => cancelSlot(appointment, kind)));
+    }
+  }
+  actions.push(confirmingButton("Cancel visit", "Click again to cancel the visit", "secondary danger", () => cancelAppointment(appointment)), closeButton());
+  openDialog("Scheduled Visit", body, actions);
 }
 
 function openEditScheduledDialog(iso, appointment) {
   const times = visitTimesEditor(appointment);
-  openDialog("Change visit times", [...visitHeading(iso, appointment), times.node, el("p", "muted", "Staff are told about changed times with the next update, if staff emails are on.")], [
+  openDialog("Change Visit Times", [...visitHeading(iso, appointment), times.node, el("p", "muted", "Staff are told about changed times with the next update, if staff emails are on.")], [
     dialogButton("Save times", "primary", async () => {
       await saveVisitTimes(appointment, times.read());
       return "Visit times saved.";
@@ -2462,7 +2763,7 @@ function openBookDialog(iso, appointment) {
   };
   select.append(option("", `As scheduled (${formatTime(start)})`), ...REQUESTABLE_STARTS.filter((time) => time !== start)
     .map((time) => option(time, `Ask for ${formatTime(time)} (needs a lab manager's approval)`)));
-  openDialog("Book this slot", [
+  openDialog("Book This Slot", [
     ...visitHeading(iso, appointment),
     el("p", "", partsText(appointment)),
     labeled("Start time", select),
@@ -2489,15 +2790,15 @@ function openMyBookingDialog(iso, appointment) {
   const actions = [];
   if (status === "booked") actions.push(bookingEmailLink(iso, appointment));
   actions.push(confirmingButton("Cancel booking", "Click again to cancel the booking", "secondary danger", async () => {
-    await setBooking(appointment, "rebooking");
+    await cancelBooking(appointment);
     return "Booking cancelled. The slot is open again, and the lab managers are emailed automatically.";
   }), closeButton());
-  openDialog("Your booking", body, actions);
+  openDialog("Your Booking", body, actions);
 }
 
 function openVisitInfoDialog(iso, appointment) {
   const status = visitStatus(appointment);
-  openDialog(status === "open" ? "Open participant slot" : status === "booked" ? "Booked visit" : "Scheduled visit", [
+  openDialog(status === "open" ? "Open Participant Slot" : status === "booked" ? "Booked Visit" : "Scheduled Visit", [
     ...visitHeading(iso, appointment),
     el("p", "", partsText(appointment)),
     ...unusualTimes(appointment).map((note) => el("p", "booking-unusual", `${SEE_TIME} ${note}`)),
@@ -2589,19 +2890,20 @@ function bookingCard(iso, appointment) {
   return card;
 }
 
-// Reviewers follow up bookings here; bookers see the ones they've made. Booking itself is on the Lab Calendar.
+// Under the Lab Calendar, reviewers follow up bookings and bookers see the ones they've made. Booking itself is on the
+// calendar.
 function renderBookingPage() {
   if (!isBooker()) return;
   const all = bookedVisits();
   const filters = isReviewer()
-    ? [["waiting", "Waiting for confirmation", (item) => visitStatus(item.appointment) === "booked"],
+    ? [["waiting", "Waiting for Confirmation", (item) => visitStatus(item.appointment) === "booked"],
       ["confirmed", "Confirmed", (item) => visitStatus(item.appointment) === "confirmed"],
-      ["cancelled", "Cancelled bookings", (item) => item.appointment.booking === "rebooking"]]
-    : [["mine", "My bookings", (item) => item.appointment.bookedBy === me.email]];
+      ["cancelled", "Cancelled Bookings", (item) => item.appointment.booking === "rebooking"]]
+    : [["mine", "My Bookings", (item) => item.appointment.bookedBy === me.email]];
   if (!filters.some(([key]) => key === bookingFilter)) bookingFilter = filters[0][0];
   document.getElementById("booking-intro").textContent = isReviewer()
     ? "Bookings waiting for you to confirm, and the ones already confirmed. Confirming records the scan time; then staff the visit."
-    : "The bookings you've made. Book participants into open slots on the Lab Calendar.";
+    : "The bookings you've made. Book participants into open slots on the calendar above.";
   document.getElementById("booking-filter").replaceChildren(...filters.map(([key, label, test]) => {
     const button = el("button", "pill-tab");
     button.type = "button";
@@ -2619,16 +2921,16 @@ function renderBookingPage() {
   const shown = all.filter(test);
   document.getElementById("booking-list").replaceChildren(...(shown.length
     ? shown.map(({ iso, appointment }) => bookingCard(iso, appointment))
-    : [el("p", "muted empty-note", isReviewer() ? "Nothing here right now." : "You haven't booked anyone yet. Open slots are on the Lab Calendar.")]));
+    : [el("p", "muted empty-note", isReviewer() ? "Nothing here right now." : "You haven't booked anyone yet. Open slots are on the calendar above.")]));
 }
 
 const VIEW_TEXT = {
   appointments: ["Lab Calendar", ""],
-  mine: ["My calendar", "Each block is a time you can't be in the lab. Open time is when you're available. Click your own blocks to change them, or drag on empty space to add a time."],
-  unavailability: ["When lab members are unavailable", "Each block is a time someone can't be in the lab. Click anyone's blocks to change them, or drag on empty space to add a time."],
-  availability: ["When lab members are available", "Each block is a time someone has nothing on their schedule, between 8 AM and 6 PM. Filter by role, or turn people on and off below it. Click a block to see what they're trained in."],
-  staffing: ["Staffing", "Each visit lists who's qualified and free. Red visits can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. Click a visit to change or cancel it, drag it to move it, or drag on empty space to add one."],
-  checker: ["Availability Checker", "See who could work at any time, not only during visits. Pick a day and times, or test them as a visit to see whether it could be staffed."],
+  mine: ["My Availability", "Each block is a time you can't be in the lab. Open time is when you're available. Click your own blocks to change them, or drag on empty space to add a time."],
+  unavailability: ["When Lab Members Are Unavailable", "Each block is a time someone can't be in the lab. Click anyone's blocks to change them, or drag on empty space to add a time."],
+  availability: ["When Lab Members Are Available", "Each block is a time someone has nothing on their schedule, between 8 AM and 6 PM. Filter by position or training, or turn people on and off below it. Click a block to see what they're trained in."],
+  staffing: ["Staffing", "For reference: every day has a 9:00–11:00 AM Lab slot and an 11:00 AM–1:00 PM Scan slot listing who's qualified and free. Red slots can't be fully staffed, and amber ones only work with careful timing, have no experienced phlebotomist, or have gaps in lab manager cover. An asterisk marks someone who's only free part of the time. These aren't visits: book, confirm and staff visits on the Lab Calendar. Click a slot to see the details, change its times or delete it, drag it to move it, or drag on empty space to add one."],
+  checker: ["Availability Checker", "See who could work at any time, not only during visits. Pick a day and a time range or a specific time, filter by group, or test a range as a visit to see whether it could be staffed."],
 };
 
 function appointmentsHint() {
@@ -2645,7 +2947,7 @@ function setCalendarView(view) {
   document.getElementById("calendar-body").hidden = checker;
   document.getElementById("availability-checker").hidden = !checker;
   const [scope, hint] = VIEW_TEXT[view] || VIEW_TEXT.appointments;
-  document.getElementById("calendar-scope").textContent = view === "mine" && enteringForOther() ? `${nameFor(targetEmail())}'s calendar` : scope;
+  document.getElementById("calendar-scope").textContent = view === "mine" && enteringForOther() ? `${nameFor(targetEmail())}'s Availability` : scope;
   document.getElementById("calendar-hint").textContent = view === "appointments" ? appointmentsHint() : hint;
   setCalendarStatus("");
   renderFilters();
@@ -2880,7 +3182,7 @@ function renderNoClasses() {
       renderNoClasses();
       setStatus(marked ? `Undone. Add the ${semester.name} class schedule above when you have it.` : `Saved: no classes in ${semester.name}, so no more reminders for it.`);
     } catch (error) {
-      setStatus(friendlyError(error), true);
+      setStatus(friendlyError(error), !error.calledOff);
     } finally {
       button.disabled = false;
     }
@@ -3056,13 +3358,32 @@ function timeOffFor(ownerEmail, form) {
 
 async function saveTimeOffFor(ownerEmail, id, form) {
   const doc = timeOffFor(ownerEmail, form);
-  await Store.saveTimeOff(id, doc);
-  if (ownerEmail !== me.email) return "Saved.";
+  if (ownerEmail !== me.email) {
+    await Store.saveTimeOff(id, doc);
+    return "Saved.";
+  }
   if (isGrad()) {
-    await leaveNotice("timeOff", `Time off: ${describeTimeOff(doc)}`);
+    const noticeId = Store.newId("notices");
+    await confirmEmails("Save Time Off", [updatesGroup(noticeId)]);
+    await Store.saveTimeOff(id, doc);
+    await leaveNotice("timeOff", `Time off: ${describeTimeOff(doc)}`, noticeId);
     return "Saved. Reviewers have been told about your time off.";
   }
+  // A request already waiting for review was emailed when it was sent, so changing it isn't emailed again.
+  const requestId = id || Store.newId("timeOff");
+  const before = timeOff.find((request) => request.id === id);
+  await confirmEmails("Request Time Off", [requestsGroup(`timeOff/${requestId}`, !before || before.status !== "pending")]);
+  await Store.saveTimeOff(requestId, doc);
   return "Sent for review. It will appear on the calendar once it's approved.";
+}
+
+// Lab managers are emailed about requests waiting for review, and about changes Grad Students/Post-Docs save.
+function requestsGroup(ref, emailed = true) {
+  return { kind: "requests", ref, label: "Lab managers", recipients: emailed ? reviewersFor("requests", me.email) : [] };
+}
+
+function updatesGroup(noticeId) {
+  return { kind: "updates", ref: `notices/${noticeId}`, label: "Lab managers", recipients: reviewersFor("updates", me.email) };
 }
 
 function describeEntry(block) {
@@ -3135,7 +3456,7 @@ function actionButton(text, action) {
     try {
       await action();
     } catch (error) {
-      setStatus(friendlyError(error), true);
+      setStatus(friendlyError(error), !error.calledOff);
     } finally {
       button.disabled = false;
     }
@@ -3180,8 +3501,8 @@ function pendingEntryIds() {
 }
 
 // Members can add entries straight away, but changing or removing a saved one needs a reviewer's approval.
-function leaveNotice(kind, summary) {
-  return Store.createNotice({ ownerEmail: me.email, kind, summary, createdAt: new Date().toISOString() });
+function leaveNotice(kind, summary, id) {
+  return Store.createNotice({ ownerEmail: me.email, kind, summary, createdAt: new Date().toISOString() }, id);
 }
 
 async function proposeChange(plan, summary) {
@@ -3192,11 +3513,15 @@ async function proposeChange(plan, summary) {
     return "Saved.";
   }
   if (isGrad()) {
+    const noticeId = Store.newId("notices");
+    await confirmEmails("Save Change", [updatesGroup(noticeId)]);
     await Store.applyClassPlan(full);
-    await leaveNotice("change", summary);
+    await leaveNotice("change", summary, noticeId);
     return "Saved. Reviewers have been told about the change.";
   }
-  await Store.createChangeRequest({ ownerEmail: me.email, status: "pending", summary, plan: full, createdAt: dateToIso(new Date()) });
+  const requestId = Store.newId("changeRequests");
+  await confirmEmails("Send Change for Review", [requestsGroup(`changeRequests/${requestId}`)]);
+  await Store.createChangeRequest({ ownerEmail: me.email, status: "pending", summary, plan: full, createdAt: dateToIso(new Date()) }, requestId);
   return "Sent for review. Your saved times stay as they are until a reviewer approves the change.";
 }
 
@@ -3348,17 +3673,30 @@ function requestRow(text, request, buttons) {
   return row;
 }
 
+// Whoever sent a request is emailed once it's first decided (when lab member emails are on).
+function decisionGroup(request, collection) {
+  return {
+    kind: "reviewResult",
+    ref: `${collection}/${request.id}`,
+    label: "The person who sent it",
+    recipients: request.status === "pending" && request.ownerEmail !== me.email ? [{ email: request.ownerEmail, name: nameFor(request.ownerEmail) }] : [],
+    off: EMAIL_SWITCHES.labMembers ? "" : "Emails to lab members are switched off while the system is being set up, so nothing will actually be sent to them yet.",
+  };
+}
+
 function changeRequestRow(request) {
   if (request.status !== "pending") return requestRow(`Schedule change: ${request.summary}`, request, []);
   const noteInput = reviewNoteInput("");
   return requestRow(`Schedule change: ${request.summary}`, request, [
     noteInput,
     actionButton("Approve", async () => {
+      await confirmEmails("Approve Change", [decisionGroup(request, "changeRequests")]);
       await Store.approveChangeRequest(request.id, checkedPlan(request), decision("approved", noteInput.value.trim()));
       await refresh();
       setStatus(`Approved ${nameFor(request.ownerEmail)}'s change.`);
     }),
     actionButton("Decline", async () => {
+      await confirmEmails("Decline Change", [decisionGroup(request, "changeRequests")]);
       await Store.decideChangeRequest(request.id, decision("declined", noteInput.value.trim()));
       await refresh();
       setStatus(`Declined ${nameFor(request.ownerEmail)}'s change.`);
@@ -3370,6 +3708,7 @@ function changeRequestRow(request) {
 function timeOffRow(request) {
   const noteInput = reviewNoteInput(request.reviewNote);
   const decide = (status, text) => actionButton(text, async () => {
+    await confirmEmails(`${text} Time Off`, [decisionGroup(request, "timeOff")]);
     await Store.decideTimeOff(request.id, decision(status, noteInput.value.trim()));
     await refresh();
     setStatus(`${status === "approved" ? "Approved" : "Declined"} ${nameFor(request.ownerEmail)}'s request.`);
@@ -3472,7 +3811,7 @@ function memberData(member, changes = {}) {
 // Each kind of reviewer email has its own switch, saved as soon as it's changed.
 function emailSettings(self) {
   const wrapper = el("div", "notify-setting");
-  wrapper.append(el("h3", "", "Email alerts"));
+  wrapper.append(el("h3", "", "Email Alerts"));
   for (const { key, label: text, help } of REVIEWER_EMAILS) {
     const label = el("label", "check-field");
     const box = el("input");
@@ -3487,7 +3826,7 @@ function emailSettings(self) {
         setStatus(box.checked ? `You'll get "${text}" emails.` : `You won't get "${text}" emails.`);
       } catch (error) {
         box.checked = !box.checked;
-        setStatus(friendlyError(error), true);
+        setStatus(friendlyError(error), !error.calledOff);
       } finally {
         box.disabled = false;
       }
@@ -3517,7 +3856,7 @@ function titleSelect(member) {
       setStatus(`${member.name} is listed as ${select.value} in the directory.`);
     } catch (error) {
       select.value = titleOf(member);
-      setStatus(friendlyError(error), true);
+      setStatus(friendlyError(error), !error.calledOff);
     } finally {
       select.disabled = false;
     }
@@ -3544,7 +3883,7 @@ function memberRow(member) {
   showChanged(false);
   const buttons = [labeled("Directory role", titleSelect(member)), unsavedNote, save];
   if (!own) {
-    buttons.push(actionButton("Edit schedule", async () => {
+    buttons.push(actionButton("Edit Schedule", async () => {
       setActingFor(member.email);
       showPage("update");
       showTab("entries");
@@ -3573,7 +3912,7 @@ function memberRow(member) {
         setStatus(`${member.name} is now ${role.value === "ra" ? "an" : "a"} ${ROLE_LABELS[role.value]}.`);
       } catch (error) {
         role.value = member.role === "member" ? "ra" : member.role;
-        setStatus(friendlyError(error), true);
+        setStatus(friendlyError(error), !error.calledOff);
       } finally {
         role.disabled = false;
       }
@@ -3766,7 +4105,7 @@ function friendlyError(error) {
 
 function updateSaveVisibility() {
   const needsReview = activeTab === "class" && reviewEl.hidden;
-  saveButton.hidden = needsReview || activeTab === "entries" || activeTab === "calendar";
+  saveButton.hidden = needsReview || activeTab === "entries";
   saveButton.textContent = activeTab === "ooo" && !enteringForOther() && ownTimeOffNeedsReview() ? "Send for review" : "Save";
 }
 
@@ -3783,7 +4122,8 @@ function showTab(tab) {
   }
   setStatus("");
   if (tab === "conflict" && !conflictRowsEl.children.length) addRow(conflictRowsEl);
-  if (tab === "calendar") {
+  // My availability shows your own times as a week calendar, with the list of them underneath.
+  if (tab === "entries") {
     mountCalendar("mine-home");
     setCalendarView("mine");
   }
@@ -3857,7 +4197,7 @@ function buildBlocks() {
 // Only reviewers ask for everyone's entries. For anyone else the database refuses that request.
 async function refresh() {
   const scope = isReviewer() ? undefined : me.email;
-  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments, loadedStaffing, contacts, profile, loadedDirectory, loadedProfiles, loadedPrivate, loadedSettings, loadedNoClasses] = await Promise.all([
+  const [people, loadedAvailability, loadedTimeOff, loadedChanges, loadedAppointments, loadedStaffing, contacts, profile, loadedDirectory, loadedProfiles, loadedPrivate, loadedSettings, loadedNoClasses, loadedReference] = await Promise.all([
     isReviewer() ? Store.listMembers() : [me],
     Store.listAvailability(scope),
     Store.listTimeOff(scope),
@@ -3865,7 +4205,8 @@ async function refresh() {
     // Everyone sees the Lab Calendar.
     Store.listAppointments(),
     isReviewer() ? Store.listStaffing() : [],
-    isBooker() && !isReviewer() ? Store.listReviewers() : [],
+    // Everyone can see who the reviewers are, so the site can say who's emailed about what they do.
+    isReviewer() ? [] : Store.listReviewers(),
     Store.getProfile(me.email),
     Store.listDirectory(),
     isReviewer() ? Store.listProfiles() : [],
@@ -3873,7 +4214,9 @@ async function refresh() {
     isReviewer() || isGrad() ? Store.listPrivatePhones() : [],
     Store.getSettings(),
     Store.listNoClasses(isReviewer() ? undefined : me.email),
+    isReviewer() ? Store.listReferenceDays() : [],
   ]);
+  referenceDays = loadedReference;
   noClasses = loadedNoClasses;
   // Calendars saved under Website management replace the ones published with the site.
   calendarSettings = loadedSettings;
@@ -3925,7 +4268,7 @@ function renderActingFor() {
   note.textContent = enteringForOther()
     ? `You're entering ${name}'s unavailable times. Everything you save for ${name} applies straight away, without review, and they'll see it on their calendar.`
     : "";
-  document.querySelector('.tab[data-tab="entries"]').textContent = enteringForOther() ? `${name}'s availability` : "My availability";
+  document.querySelector('.tab[data-tab="entries"]').textContent = enteringForOther() ? `${name}'s Availability` : "My Availability";
 }
 
 function setActingFor(email) {
@@ -3943,7 +4286,6 @@ function showPage(page) {
   document.getElementById("page-calendar").hidden = page !== "calendar";
   document.getElementById("page-update").hidden = page !== "update";
   document.getElementById("page-manage").hidden = page !== "manage";
-  document.getElementById("page-booking").hidden = page !== "booking";
   document.getElementById("page-profile").hidden = page !== "profile";
   document.getElementById("page-directory").hidden = page !== "directory";
   document.getElementById("page-admin").hidden = page !== "admin";
@@ -3953,7 +4295,7 @@ function showPage(page) {
     setCalendarView("appointments");
   } else if (page === "admin") {
     setAdminView(adminView);
-  } else if (page === "update" && activeTab === "calendar") {
+  } else if (page === "update" && activeTab === "entries") {
     mountCalendar("mine-home");
     setCalendarView("mine");
   }
@@ -3963,7 +4305,7 @@ function showPage(page) {
   }
   // Schedules is highlighted when one of the pages in its menu is open.
   const schedules = document.getElementById("schedules-button");
-  if (["calendar", "update", "booking"].includes(page)) schedules.setAttribute("aria-current", "page");
+  if (["calendar", "update"].includes(page)) schedules.setAttribute("aria-current", "page");
   else schedules.removeAttribute("aria-current");
   const manage = document.getElementById("manage-button");
   if (page === "manage") manage.setAttribute("aria-current", "page");
@@ -4029,7 +4371,8 @@ async function handleAuthChange(user) {
     }
     me = member;
     document.getElementById("manage-link").hidden = !isReviewer();
-    document.getElementById("booking-link").hidden = !isBooker();
+    document.getElementById("profile-menu-settings").hidden = !isReviewer();
+    document.getElementById("booking-section").hidden = !isBooker();
     document.getElementById("admin-link").hidden = !isReviewer();
     document.getElementById("ooo-help").textContent = ownTimeOffNeedsReview()
       ? "Ask for time you won't be in the lab, either whole days or part of a single day. Your request goes to a reviewer, and it's marked as pending on your calendar until they approve it."
@@ -4141,7 +4484,7 @@ function wireUpEvents() {
       button.disabled = false;
     }
   });
-  for (const id of ["check-date", "check-start", "check-end", "check-kind"]) {
+  for (const id of ["check-date", "check-mode", "check-start", "check-end", "check-kind"]) {
     document.getElementById(id).addEventListener("change", renderAvailabilityCheck);
   }
   document.getElementById("dialog-close").addEventListener("click", () => dialogEl.close());
@@ -4177,7 +4520,7 @@ function wireUpEvents() {
     try {
       await addMember();
     } catch (error) {
-      setStatus(friendlyError(error), true);
+      setStatus(friendlyError(error), !error.calledOff);
     }
   });
   for (const id of ["sign-in", "sign-out", "not-listed-sign-out"]) {
@@ -4194,7 +4537,7 @@ function wireUpEvents() {
     try {
       await saveActiveTab();
     } catch (error) {
-      setStatus(friendlyError(error), true);
+      setStatus(friendlyError(error), !error.calledOff);
     } finally {
       saveButton.disabled = false;
     }

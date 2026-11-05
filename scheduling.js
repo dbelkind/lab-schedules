@@ -60,8 +60,34 @@ const WRAP_UP_MINUTES = 30;
 // Default visits open 60 days ahead, with the newest day added at 8:00 AM each morning.
 const VISITS_DAYS_AHEAD = 60;
 const VISITS_OPEN_HOUR = 8;
-// Booking on the website starts with the spring 2027 visits. Earlier ones were booked the old way.
-const BOOKING_STARTS = "2027-01-03";
+// Booking on the website starts with the visits from November 5, 2026. Earlier ones were booked the old way.
+const BOOKING_STARTS = "2026-11-05";
+
+// Emails the Apps Script sends to lab members other than reviewers. These only tell the site what to say when it asks
+// who to email; the switches that actually send them are inviteStaff and emailLabMembers in apps-script/Code.gs, so
+// keep the two in step.
+const EMAIL_SWITCHES = { staff: false, labMembers: false };
+
+// A lab portion can need all three lab roles (the usual), or just some of them for participants who only come in for
+// part of it. `roles` on a lab portion lists the ones it needs; without it, it needs all three.
+const LAB_ROLES = ["dryLab", "phlebotomy", "wetLab"];
+const LAB_ONLY_KINDS = [
+  { key: "drywet", label: "Dry & Wet Lab only", roles: ["dryLab", "wetLab"] },
+  { key: "phlebwet", label: "Phlebotomy & Wet Lab only", roles: ["phlebotomy", "wetLab"] },
+  { key: "wet", label: "Wet Lab only", roles: ["wetLab"] },
+];
+
+function labNeeds(slot) {
+  const roles = slot && Array.isArray(slot.roles) ? slot.roles : LAB_ROLES;
+  return { dryLab: roles.includes("dryLab"), phlebotomy: roles.includes("phlebotomy"), wetLab: roles.includes("wetLab") };
+}
+
+// When Wet Lab's 2 hours can start: within 30 minutes after phlebotomy ends, or of the lab portion's start when
+// there's no phlebotomy. This is the time that counts as "phlebotomy" for that, in minutes.
+function wetLabAnchor(slot, phlebotomyAt) {
+  if (!labNeeds(slot).phlebotomy) return timeToMinutes(slot.start) - PHLEBOTOMY_MINUTES;
+  return phlebotomyAt;
+}
 
 function isoWeekday(iso) {
   const [y, month, day] = iso.split("-").map(Number);
@@ -179,7 +205,10 @@ const REQUESTABLE_STARTS = ["08:00", "08:15", "08:30", "08:45", "09:00", "09:15"
 
 function visitPartsLabel(appointment) {
   if (appointment.lab && appointment.scan) return "";
-  return appointment.lab ? "Lab portion only" : "Scan only";
+  if (!appointment.lab) return "Scan only";
+  const roles = appointment.lab.roles;
+  const kind = Array.isArray(roles) && LAB_ONLY_KINDS.find((item) => item.roles.join("|") === LAB_ROLES.filter((role) => roles.includes(role)).join("|"));
+  return kind ? kind.label : "Lab portion only";
 }
 
 function isOffHours(iso, start, end) {
@@ -254,46 +283,52 @@ function wetLabStarts(person, phlebotomyAt) {
 // particular timing, rather than phlebotomy at the start and Wet Lab straight after.
 // Phlebotomy goes to the most experienced level that works: without an Experienced Phlebotomist the slot gets a
 // warning, and with only a Training Phlebotomist it can't be staffed unless mobile phlebotomy is booked.
+// A lab portion that only needs some roles (see LAB_ONLY_KINDS) is only checked for those.
 function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
+  const needs = labNeeds(slot);
   const slotStart = timeToMinutes(slot.start);
   const slotEnd = timeToMinutes(slot.end);
-  const dry = withSkill(people, "Dry Lab").filter((person) => freeBetween(person, slotStart, slotEnd));
-  const phlebotomists = people.filter((person) => phlebotomyLevel(person) >= 0)
-    .sort((a, b) => phlebotomyLevel(a) - phlebotomyLevel(b));
+  const dry = needs.dryLab ? withSkill(people, "Dry Lab").filter((person) => freeBetween(person, slotStart, slotEnd)) : [];
+  const phlebotomists = needs.phlebotomy ? people.filter((person) => phlebotomyLevel(person) >= 0)
+    .sort((a, b) => phlebotomyLevel(a) - phlebotomyLevel(b)) : [];
   const wetLabbers = withSkill(people, "Wet Lab");
 
-  const options = [];
-  for (let at = slotStart; at + PHLEBOTOMY_MINUTES <= slotEnd; at += TIMING_STEP_MINUTES) {
-    options.push({
-      at,
-      phlebotomy: phlebotomists.filter((person) => freeBetween(person, at, at + PHLEBOTOMY_MINUTES)),
-      wet: wetLabbers.flatMap((person) => wetLabStarts(person, at).map((start) => ({ person, start }))),
-    });
+  // Each possible phlebotomy time; without phlebotomy, Wet Lab just starts from the beginning of the slot.
+  const anchors = [];
+  if (needs.phlebotomy) {
+    for (let at = slotStart; at + PHLEBOTOMY_MINUTES <= slotEnd; at += TIMING_STEP_MINUTES) anchors.push(at);
+  } else {
+    anchors.push(wetLabAnchor(slot));
   }
+  const options = anchors.map((at) => ({
+    at,
+    phlebotomy: phlebotomists.filter((person) => freeBetween(person, at, at + PHLEBOTOMY_MINUTES)),
+    wet: wetLabbers.flatMap((person) => wetLabStarts(person, at).map((start) => ({ person, start }))),
+  }));
   const phlebotomy = phlebotomists.filter((person) => options.some((option) => option.phlebotomy.includes(person)));
   const wet = wetLabbers.filter((person) => options.some((option) => option.wet.some((choice) => choice.person === person)));
 
   const plans = [];
   for (const option of options) {
-    if (!option.phlebotomy.length) continue;
-    const choice = option.wet.find((candidate) => dry.some((dryPerson) => dryPerson !== candidate.person));
-    if (choice) plans.push({ phlebotomyAt: option.at, wetStart: choice.start, level: phlebotomyLevel(option.phlebotomy[0]) });
+    if (needs.phlebotomy && !option.phlebotomy.length) continue;
+    const choice = option.wet.find((candidate) => !needs.dryLab || dry.some((dryPerson) => dryPerson !== candidate.person));
+    if (choice) plans.push({ phlebotomyAt: option.at, wetStart: choice.start, level: needs.phlebotomy ? phlebotomyLevel(option.phlebotomy[0]) : 0 });
   }
 
   const problems = [];
   const flags = [];
   if (!wet.length) problems.push("No one available for Wet Lab");
-  if (!dry.length) problems.push("No one available for Dry Lab");
-  if (!phlebotomy.length) problems.push("No one available for Phlebotomy");
+  if (needs.dryLab && !dry.length) problems.push("No one available for Dry Lab");
+  if (needs.phlebotomy && !phlebotomy.length) problems.push("No one available for Phlebotomy");
   if (!problems.length && !plans.length) {
-    const timingWorks = options.some((option) => option.phlebotomy.length && option.wet.length);
+    const timingWorks = options.some((option) => (!needs.phlebotomy || option.phlebotomy.length) && option.wet.length);
     problems.push(timingWorks
       ? `Wet Lab and Dry Lab need two different people, but only ${wet[0].name} is available for them`
       : "Phlebotomy and Wet Lab can't be lined up: Wet Lab needs 2 hours, starting within 30 minutes after phlebotomy ends");
   }
 
-  const level = Math.min(...(plans.length ? plans.map((plan) => plan.level) : phlebotomy.map(phlebotomyLevel)));
   const warnings = [];
+  const level = needs.phlebotomy ? Math.min(...(plans.length ? plans.map((plan) => plan.level) : phlebotomy.map(phlebotomyLevel))) : 0;
   if (level === 2) {
     problems.push("Only a Training Phlebotomist is available: this visit can only be staffed if mobile phlebotomy is booked in advance");
   } else if (level === 1) {
@@ -301,8 +336,9 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
     flags.push("No experienced phlebotomist");
   }
 
+  const usual = anchors[0];
   const levelPlans = plans.filter((plan) => plan.level === level);
-  const standard = levelPlans.find((plan) => plan.phlebotomyAt === slotStart && plan.wetStart === slotStart + PHLEBOTOMY_MINUTES);
+  const standard = levelPlans.find((plan) => plan.phlebotomyAt === usual && plan.wetStart === usual + PHLEBOTOMY_MINUTES);
   const tight = !problems.length && !standard;
   const plan = problems.length ? null : standard || levelPlans[0];
 
@@ -315,25 +351,26 @@ function evaluateLab(people, slot = DEFAULT_SLOTS.lab) {
     return { ...tagged, limited: true };
   });
   const markWet = wet.map((person) => {
-    if (wetLabStarts(person, slotStart).includes(slotStart + PHLEBOTOMY_MINUTES)) return person;
+    if (wetLabStarts(person, usual).includes(usual + PHLEBOTOMY_MINUTES)) return person;
     const starts = [...new Set(options.flatMap((option) => option.wet.filter((choice) => choice.person === person).map((choice) => choice.start)))].sort((a, b) => a - b);
     const range = starts[0] === starts[starts.length - 1] ? `at ${clockTime(starts[0])}` : `between ${clockTime(starts[0])} and ${clockTime(starts[starts.length - 1])}`;
     notes.push(`${person.name} (Wet Lab): can only start ${range}`);
     return { ...person, limited: true };
   });
 
+  const wetRange = plan ? `${clockTime(plan.wetStart)}–${clockTime(plan.wetStart + WET_LAB_MINUTES)}` : "";
   return {
     groups: [
       { label: "Wet Lab", people: markWet },
-      { label: "Dry Lab", people: dry },
-      { label: "Phlebotomy", people: markPhlebotomy },
+      ...(needs.dryLab ? [{ label: "Dry Lab", people: dry }] : []),
+      ...(needs.phlebotomy ? [{ label: "Phlebotomy", people: markPhlebotomy }] : []),
     ],
     problems,
     warnings,
     flags,
     tight,
     timing: plan && tight
-      ? `Works if phlebotomy is at ${clockTime(plan.phlebotomyAt)} and Wet Lab runs ${clockTime(plan.wetStart)}–${clockTime(plan.wetStart + WET_LAB_MINUTES)}`
+      ? (needs.phlebotomy ? `Works if phlebotomy is at ${clockTime(plan.phlebotomyAt)} and Wet Lab runs ${wetRange}` : `Works if Wet Lab runs ${wetRange}`)
       : "",
     notes,
   };
@@ -547,12 +584,18 @@ function loadOf(loads, people) {
 }
 
 // The earliest timing that works for this phlebotomist and Wet Lab person, so phlebotomy at the start and Wet Lab
-// straight after whenever they can.
+// straight after whenever they can. With no phlebotomist (none needed, or mobile phlebotomy booked), only Wet Lab's
+// own time is checked.
 function labTiming(slot, phlebotomist, wetLabber) {
   const slotStart = timeToMinutes(slot.start);
   const slotEnd = timeToMinutes(slot.end);
+  if (!labNeeds(slot).phlebotomy) {
+    const anchor = wetLabAnchor(slot);
+    const [wetStart] = wetLabStarts(wetLabber, anchor);
+    return wetStart === undefined ? null : { phlebotomyAt: anchor, wetStart, standard: wetStart === slotStart };
+  }
   for (let at = slotStart; at + PHLEBOTOMY_MINUTES <= slotEnd; at += TIMING_STEP_MINUTES) {
-    if (!freeBetween(phlebotomist, at, at + PHLEBOTOMY_MINUTES)) continue;
+    if (phlebotomist && !freeBetween(phlebotomist, at, at + PHLEBOTOMY_MINUTES)) continue;
     const [wetStart] = wetLabStarts(wetLabber, at);
     if (wetStart !== undefined) return { phlebotomyAt: at, wetStart, standard: at === slotStart && wetStart === slotStart + PHLEBOTOMY_MINUTES };
   }
@@ -561,13 +604,15 @@ function labTiming(slot, phlebotomist, wetLabber) {
 
 // Ranked by phlebotomy level, then by who has the fewest visits nearby, then by the usual timing.
 function labOptions(iso, slot, data, loads, limit = 3) {
+  const needs = labNeeds(slot);
   const people = candidatesOn(iso, data);
-  const dry = withSkill(people, "Dry Lab").filter((person) => freeBetween(person, timeToMinutes(slot.start), timeToMinutes(slot.end)));
-  const phlebotomists = people.filter((person) => phlebotomyLevel(person) >= 0);
+  // A role the lab portion doesn't need is left empty (null) in every option.
+  const dry = needs.dryLab ? withSkill(people, "Dry Lab").filter((person) => freeBetween(person, timeToMinutes(slot.start), timeToMinutes(slot.end))) : [null];
+  const phlebotomists = needs.phlebotomy ? people.filter((person) => phlebotomyLevel(person) >= 0) : [null];
   const wetLabbers = withSkill(people, "Wet Lab");
   const timings = new Map();
   const timingFor = (phlebotomist, wetLabber) => {
-    const key = `${phlebotomist.email}|${wetLabber.email}`;
+    const key = `${phlebotomist ? phlebotomist.email : ""}|${wetLabber.email}`;
     if (!timings.has(key)) timings.set(key, labTiming(slot, phlebotomist, wetLabber));
     return timings.get(key);
   };
@@ -578,16 +623,17 @@ function labOptions(iso, slot, data, loads, limit = 3) {
         if (wetLabber === dryPerson) continue;
         const timing = timingFor(phlebotomist, wetLabber);
         if (!timing) continue;
+        const staff = [dryPerson, phlebotomist, wetLabber].filter(Boolean);
         options.push({
-          dryLab: dryPerson.email,
-          phlebotomy: phlebotomist.email,
-          phlebotomyAt: clockOf(timing.phlebotomyAt),
+          dryLab: dryPerson ? dryPerson.email : null,
+          phlebotomy: phlebotomist ? phlebotomist.email : null,
+          phlebotomyAt: needs.phlebotomy ? clockOf(timing.phlebotomyAt) : null,
           wetLab: wetLabber.email,
           wetLabStart: clockOf(timing.wetStart),
-          level: phlebotomyLevel(phlebotomist),
+          level: phlebotomist ? phlebotomyLevel(phlebotomist) : 0,
           standard: timing.standard,
-          load: loadOf(loads, [dryPerson, phlebotomist, wetLabber]),
-          names: `${dryPerson.name} ${phlebotomist.name} ${wetLabber.name}`,
+          load: loadOf(loads, staff),
+          names: staff.map((person) => person.name).join(" "),
         });
       }
     }
@@ -684,16 +730,20 @@ function checkAssignment(iso, appointment, assignment, data) {
 
   if (appointment.lab) {
     const lab = assignment.lab || {};
+    const required = labNeeds(appointment.lab);
     const slotStart = timeToMinutes(appointment.lab.start);
     const slotEnd = timeToMinutes(appointment.lab.end);
-    const at = lab.phlebotomyAt ? timeToMinutes(lab.phlebotomyAt) : slotStart;
+    const at = required.phlebotomy ? (lab.phlebotomyAt ? timeToMinutes(lab.phlebotomyAt) : slotStart) : wetLabAnchor(appointment.lab);
     const wetStart = lab.wetLabStart ? timeToMinutes(lab.wetLabStart) : at + PHLEBOTOMY_MINUTES;
-    needs(lab.dryLab, "Dry Lab", has("Dry Lab"), slotStart, slotEnd);
-    const phlebotomist = needs(lab.phlebotomy, "Phlebotomy", (person) => phlebotomyLevel(person) >= 0, at, at + PHLEBOTOMY_MINUTES);
+    if (required.dryLab) needs(lab.dryLab, "Dry Lab", has("Dry Lab"), slotStart, slotEnd);
+    // With mobile phlebotomy booked, no one from the lab does phlebotomy.
+    const phlebotomist = required.phlebotomy && !lab.mobilePhlebotomy
+      ? needs(lab.phlebotomy, "Phlebotomy", (person) => phlebotomyLevel(person) >= 0, at, at + PHLEBOTOMY_MINUTES)
+      : null;
     needs(lab.wetLab, "Wet Lab", has("Wet Lab"), wetStart, wetStart + WET_LAB_MINUTES);
-    if (at < slotStart || at + PHLEBOTOMY_MINUTES > slotEnd) issues.push("Phlebotomy has to be during the lab portion");
+    if (required.phlebotomy && (at < slotStart || at + PHLEBOTOMY_MINUTES > slotEnd)) issues.push("Phlebotomy has to be during the lab portion");
     if (wetStart < at + PHLEBOTOMY_MINUTES || wetStart > at + PHLEBOTOMY_MINUTES + MAX_GAP_MINUTES) {
-      issues.push("Wet Lab has to start within 30 minutes after phlebotomy ends");
+      issues.push(required.phlebotomy ? "Wet Lab has to start within 30 minutes after phlebotomy ends" : "Wet Lab has to start within 30 minutes of the start of the lab portion");
     }
     if (lab.dryLab && lab.dryLab === lab.wetLab) issues.push("Wet Lab and Dry Lab must be different people");
     if (phlebotomist && phlebotomyLevel(phlebotomist) === 2) {
@@ -767,7 +817,7 @@ function staffRoles(appointment, assignment) {
     const lab = assignment.lab;
     add(lab.dryLab, "Dry Lab", timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end), "lab");
     const at = timeToMinutes(lab.phlebotomyAt || appointment.lab.start);
-    add(lab.phlebotomy, "Phlebotomy", at, at + PHLEBOTOMY_MINUTES, "lab");
+    if (!lab.mobilePhlebotomy) add(lab.phlebotomy, "Phlebotomy", at, at + PHLEBOTOMY_MINUTES, "lab");
     const wetStart = timeToMinutes(lab.wetLabStart || appointment.lab.start);
     add(lab.wetLab, "Wet Lab", wetStart, wetStart + WET_LAB_MINUTES, "lab");
   }
@@ -790,9 +840,9 @@ function assignmentLines(appointment, assignment, nameOf) {
   if (appointment.lab && assignment.lab) {
     const lab = assignment.lab;
     if (lab.dryLab) lines.lab.push(`Dry Lab: ${nameOf(lab.dryLab)}, ${range(timeToMinutes(appointment.lab.start), timeToMinutes(appointment.lab.end))}`);
-    if (lab.phlebotomy) {
+    if (lab.mobilePhlebotomy || lab.phlebotomy) {
       const at = timeToMinutes(lab.phlebotomyAt || appointment.lab.start);
-      lines.lab.push(`Phlebotomy: ${nameOf(lab.phlebotomy)}, ${range(at, at + PHLEBOTOMY_MINUTES)}`);
+      lines.lab.push(`Phlebotomy: ${lab.mobilePhlebotomy ? "Mobile phlebotomy (booked)" : nameOf(lab.phlebotomy)}, ${range(at, at + PHLEBOTOMY_MINUTES)}`);
     }
     if (lab.wetLab) {
       const start = timeToMinutes(lab.wetLabStart || appointment.lab.start);

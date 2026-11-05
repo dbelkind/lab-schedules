@@ -99,7 +99,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: none;
   mix-blend-mode: multiply;
 }
 
-.page-nav { display: flex; gap: 4px; }
+.page-nav { display: flex; flex-wrap: wrap; gap: 4px; }
+@media (min-width: 1100px) {
+  .top-bar-inner { flex-wrap: nowrap; }
+}
 .page-link {
   padding: 8px 14px;
   border: 0;
@@ -109,6 +112,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: none;
   font: inherit;
   font-size: 14px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color 0.15s, color 0.15s;
 }
@@ -116,14 +120,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: none;
 .page-link[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
 
 .user-bar { position: relative; display: flex; align-items: center; margin-left: auto; }
-.user-email { color: var(--text); font-size: 14px; line-height: 1; }
+.profile-menu-email { margin: 0 0 4px; padding: 8px 12px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 
 /* The profile menu: an avatar, the email and a caret that turns over when it's open. */
 .profile-button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 12px 4px 4px;
+  padding: 4px 10px 4px 4px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface);
@@ -155,7 +159,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: none;
   top: calc(100% + 8px);
   right: 0;
   z-index: 20;
-  min-width: 190px;
+  min-width: 220px;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -907,9 +911,33 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .notify-setting > p:last-child { margin: 14px 0 0; }
 
 /* Who's available */
-.check-roles { display: grid; gap: 8px; margin-top: 12px; }
-.check-role { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); font-size: 14px; }
-.check-role strong { display: block; margin-bottom: 2px; }
+.group-managers { --group: #a03a6a; --group-soft: #fdf3f7; }
+.group-phlebotomy { --group: #b91c1c; --group-soft: #fef2f2; }
+.group-wet { --group: #6d28d9; --group-soft: #f5f3ff; }
+.group-dry { --group: #b45309; --group-soft: #fffbeb; }
+.group-scanning { --group: #1d4ed8; --group-soft: #eff6ff; }
+.check-filters { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 18px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
+.check-filters-title { padding-top: 2px; }
+.check-filter .check-field { margin: 0; }
+.check-filter-group { color: var(--group); font-weight: 600; }
+.check-filter-group input, .check-filter-sub input { accent-color: var(--group); }
+.check-filter-subs { display: grid; gap: 2px; margin: 4px 0 0 22px; padding-left: 8px; border-left: 2px solid var(--group-soft); font-size: 13px; }
+.check-hint { margin: 12px 0 0; font-size: 13px; }
+.check-groups { display: grid; gap: 8px; margin-top: 8px; }
+.check-group { border: 1px solid var(--line); border-left: 4px solid var(--group); border-radius: var(--radius-small); background: var(--surface); font-size: 14px; }
+.check-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 14px; cursor: pointer; }
+.check-group[open] .check-group-head { border-bottom: 1px solid var(--line); background: var(--group-soft); }
+.check-group-head strong { color: var(--group); }
+.check-group-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--group); }
+.check-count { margin-left: auto; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+.check-count-ok { background: #f0fdf4; color: #166534; }
+.check-count-part { background: #fffbeb; color: #92400e; }
+.check-count-none { background: #fef2f2; color: #991b1b; }
+.check-count-extra { font-size: 13px; }
+.check-group-body { display: grid; gap: 10px; padding: 10px 14px 12px; }
+.check-subgroup-head { margin-bottom: 2px; color: var(--group); font-weight: 600; }
+.entries-heading { margin: 28px 0 8px; font-size: 16px; }
+.check-people-label { margin-right: 4px; font-weight: 600; }
 .check-ok { margin: 10px 0; padding: 10px 14px; border: 1px solid #86efac; border-radius: var(--radius-small); background: #f0fdf4; color: #166534; }
 #check-results .check-ok strong, #check-results .slot-tight-box strong, #check-results .slot-issues strong { display: block; }
 
@@ -1163,9 +1191,40 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 /* Administrative Schedules */
 #page-admin { display: grid; gap: 14px; }
-.admin-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; }
+/* The tabs stay on the right; the Unavailable/Available switch appears beside the heading without moving them. */
+.admin-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
 .admin-head h2 { margin: 0; font-size: 24px; }
-.admin-head .pill-tabs { margin: 0; }
+.admin-head .pill-tabs { margin: 0 0 0 auto; }
+
+/* A two-way switch: the mode that's on is filled pink, the other is white. Square-cornered, unlike the pill tabs. */
+.mode-switch { display: inline-flex; overflow: hidden; border: 1px solid var(--pink-700); border-radius: 6px; background: var(--surface); }
+.mode-switch button { padding: 7px 14px; border: 0; border-radius: 0; background: var(--surface); color: var(--pink-700); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color 0.15s, color 0.15s; }
+.mode-switch button + button { border-left: 1px solid var(--pink-700); }
+.mode-switch button:hover:not([aria-pressed="true"]) { background: var(--pink-50); }
+.mode-switch button[aria-pressed="true"] { background: var(--pink-700); color: #ffffff; }
+.mode-switch button:focus-visible { outline: 2px solid var(--pink-300); outline-offset: -4px; }
+.role-filters-note { margin: 10px 0 0; font-size: 13px; }
+
+/* Who's available, on the Lab Calendar's visits */
+.visit-availability { margin: 14px 0 4px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface-muted); }
+.visit-availability > summary { font-weight: 700; cursor: pointer; }
+.visit-availability .availability-part { margin: 12px 0 4px; font-size: 15px; }
+
+/* The email pop-up */
+.email-dialog { max-width: 520px; }
+.email-group { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+.email-group h3 { margin: 0 0 6px; font-size: 15px; }
+.email-group .check-field { margin: 4px 0; }
+.email-none { margin: 10px 0; font-weight: 600; }
+.email-message { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-small); font: inherit; resize: vertical; }
+
+/* Bookings, under the Lab Calendar */
+.booking-section { max-width: 1240px; margin: 28px auto 0; padding: 24px 24px 8px; border-top: 1px solid var(--line); }
+.booking-section > h2 { margin: 0 0 6px; font-size: 22px; font-weight: 700; }
+.booking-section > p { margin: 0 0 8px; }
+@media (max-width: 600px) {
+  .booking-section { padding: 20px 16px 8px; }
+}
 
 /* Role filter groups */
 .role-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }

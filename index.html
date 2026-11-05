@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=24">
+  <link rel="stylesheet" href="style.css?v=28">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -26,8 +26,7 @@
           </button>
           <div id="schedules-menu" class="nav-dropdown" role="menu" hidden>
             <button type="button" class="menu-item" role="menuitem" data-page="calendar">Lab Calendar</button>
-            <button type="button" class="menu-item" role="menuitem" data-page="update">Update your Availability</button>
-            <button id="booking-link" type="button" class="menu-item" role="menuitem" data-page="booking" hidden>Booking</button>
+            <button type="button" class="menu-item" role="menuitem" data-page="update">Update Your Availability</button>
           </div>
         </div>
         <button id="admin-link" type="button" class="page-link" data-page="admin" hidden>Administrative Schedules</button>
@@ -37,24 +36,25 @@
             Lab Management <span class="nav-caret" aria-hidden="true"></span><span id="manage-badge" class="count-badge" hidden></span>
           </button>
           <div id="manage-menu" class="nav-dropdown" role="menu" hidden>
-            <button type="button" class="menu-item has-badge" role="menuitem" data-manage-go="review">Review requests<span id="manage-menu-badge" class="count-badge inline" hidden></span></button>
-            <button type="button" class="menu-item" role="menuitem" data-manage-go="members">Lab members</button>
-            <button type="button" class="menu-item" role="menuitem" data-manage-go="website">Website management</button>
-            <button type="button" class="menu-item" role="menuitem" data-manage-go="settings">Settings</button>
+            <button type="button" class="menu-item has-badge" role="menuitem" data-manage-go="review">Review Requests<span id="manage-menu-badge" class="count-badge inline" hidden></span></button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="members">Lab Members</button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="website">Website Management</button>
+            <button type="button" class="menu-item" role="menuitem" data-manage-go="settings">My Settings</button>
           </div>
         </div>
       </nav>
       <div id="user-bar" class="user-bar" hidden>
-        <button id="profile-button" type="button" class="profile-button" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-menu">
+        <button id="profile-button" type="button" class="profile-button" aria-label="Your account" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-menu">
           <span class="profile-avatar" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="8.5" r="4"/><path d="M4 20.5c0-4.1 3.6-6.5 8-6.5s8 2.4 8 6.5z"/></svg>
           </span>
-          <span id="user-email" class="user-email"></span>
           <span class="profile-caret" aria-hidden="true"></span>
         </button>
         <div id="profile-menu" class="profile-menu" role="menu" hidden>
+          <div id="user-email" class="profile-menu-email"></div>
           <button id="profile-menu-profile" type="button" class="menu-item" role="menuitem" data-page="profile">My Profile</button>
-          <button id="sign-out" type="button" class="menu-item" role="menuitem">Sign out</button>
+          <button id="profile-menu-settings" type="button" class="menu-item" role="menuitem" data-manage-go="settings" hidden>My Settings</button>
+          <button id="sign-out" type="button" class="menu-item" role="menuitem">Sign Out</button>
         </div>
       </div>
     </div>
@@ -97,7 +97,7 @@
       <span id="calendar-status" class="status calendar-status" role="status"></span>
     </div>
 
-    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update your Availability</button>.</p>
+    <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update Your Availability</button>.</p>
     <div id="role-filters" class="role-filters" aria-label="Filter by role" hidden></div>
     <div id="filters" class="filters" aria-label="Filter by lab member"></div>
 
@@ -125,13 +125,19 @@
         <label class="field">Date
           <input id="check-date" type="date">
         </label>
-        <label class="field">From
+        <label class="field">Look at
+          <select id="check-mode">
+            <option value="range">A time range</option>
+            <option value="at">A specific time</option>
+          </select>
+        </label>
+        <label class="field"><span id="check-start-label">From</span>
           <input id="check-start" type="time" value="09:00">
         </label>
-        <label class="field">Until
+        <label id="check-end-field" class="field">Until
           <input id="check-end" type="time" value="13:00">
         </label>
-        <label class="field">Check
+        <label id="check-kind-field" class="field">Check
           <select id="check-kind">
             <option value="any">Who's free</option>
             <option value="full">As a full visit (4 hours from the start)</option>
@@ -140,30 +146,40 @@
           </select>
         </label>
       </div>
+      <div id="check-filters" class="check-filters"></div>
       <div id="check-results"></div>
     </div>
     </div>
     </div>
+    <!-- Bookers and reviewers follow up bookings here, under the Lab Calendar. -->
+    <section id="booking-section" class="booking-section" hidden>
+      <h2>Bookings</h2>
+      <p id="booking-intro" class="muted">Bookings made on the calendar above, listed so they're easy to follow up on.</p>
+      <p class="notice">Never enter participant information on this site, not even a Screener ID. When you mark a visit booked, an email to the reviewers opens in your own USC email: add the Screener ID and send it. If a participant cancels, use <strong>Cancel booking</strong>: the visit opens again so it can be rebooked, and the lab managers are emailed automatically.</p>
+      <div id="booking-filter" class="pill-tabs booking-filter" role="tablist" aria-label="Show bookings"></div>
+      <p id="booking-status" class="status" role="status"></p>
+      <div id="booking-list"></div>
+    </section>
     </section>
 
     <section id="page-admin" hidden>
       <div class="admin-head">
         <h2>Administrative Schedules</h2>
+        <div id="team-toggle" class="mode-switch" role="group" aria-label="Show" hidden>
+          <button type="button" data-team="unavailability" aria-pressed="true">Unavailable Times</button>
+          <button type="button" data-team="availability" aria-pressed="false">Available Times</button>
+        </div>
         <div id="admin-tabs" class="pill-tabs" role="tablist" aria-label="Administrative schedules">
-          <button type="button" class="pill-tab" role="tab" data-admin="team" aria-selected="false">Team availability</button>
+          <button type="button" class="pill-tab" role="tab" data-admin="team" aria-selected="false">Team Availability</button>
           <button type="button" class="pill-tab" role="tab" data-admin="staffing" aria-selected="true">Staffing</button>
           <button type="button" class="pill-tab" role="tab" data-admin="checker" aria-selected="false">Availability Checker</button>
-        </div>
-        <div id="team-toggle" class="segmented" role="group" aria-label="Show" hidden>
-          <button type="button" data-team="unavailability" aria-pressed="true">Unavailable times</button>
-          <button type="button" data-team="availability" aria-pressed="false">Available times</button>
         </div>
       </div>
       <div id="admin-home"></div>
     </section>
 
     <section id="page-update" class="upload" hidden>
-      <h2>Update your availability</h2>
+      <h2>Update Your Availability</h2>
       <div id="acting-for-field" class="acting-for" hidden>
         <label class="field">Entering times for
           <select id="acting-for"></select>
@@ -179,11 +195,10 @@
       </div>
 
       <div class="tabs" role="tablist">
-        <button type="button" class="tab" role="tab" data-tab="class" aria-selected="true">Class schedule</button>
-        <button type="button" class="tab" role="tab" data-tab="conflict" aria-selected="false">Standing conflict</button>
-        <button type="button" class="tab" role="tab" data-tab="ooo" aria-selected="false">Request time off</button>
-        <button type="button" class="tab" role="tab" data-tab="entries" aria-selected="false">My availability</button>
-        <button type="button" class="tab" role="tab" data-tab="calendar" aria-selected="false">My calendar</button>
+        <button type="button" class="tab" role="tab" data-tab="class" aria-selected="true">Class Schedule</button>
+        <button type="button" class="tab" role="tab" data-tab="conflict" aria-selected="false">Standing Conflict</button>
+        <button type="button" class="tab" role="tab" data-tab="ooo" aria-selected="false">Request Time Off</button>
+        <button type="button" class="tab" role="tab" data-tab="entries" aria-selected="false">My Availability</button>
       </div>
 
       <div id="panel-class">
@@ -204,7 +219,7 @@
         <button id="manual" type="button" class="link-button">Or enter times by hand</button>
 
         <div id="review" hidden>
-          <h3>Check your class times</h3>
+          <h3>Check Your Class Times</h3>
           <p class="muted">You'll be marked unavailable at these times. Automatic reading can make mistakes, so please compare them with your schedule.</p>
           <div id="rows"></div>
           <button id="add-row" type="button" class="link-button">Add another class time</button>
@@ -263,11 +278,9 @@
       </div>
 
       <div id="panel-entries" hidden>
-        <div id="my-entries"></div>
-      </div>
-
-      <div id="panel-calendar" hidden>
         <div id="mine-home"></div>
+        <h3 class="entries-heading">All Entries</h3>
+        <div id="my-entries"></div>
       </div>
 
       <p id="upload-status" class="status" role="status"></p>
@@ -339,24 +352,15 @@
       </div>
     </section>
 
-    <section id="page-booking" class="upload" hidden>
-      <h2>Booking</h2>
-      <p id="booking-intro" class="muted">Book participants into open slots on the Lab Calendar. This page lists bookings so they're easy to follow up on.</p>
-      <p class="notice">Never enter participant information on this site, not even a Screener ID. When you mark a visit booked, an email to the reviewers opens in your own USC email: add the Screener ID and send it. If a participant cancels, use <strong>Cancel booking</strong>: the visit opens again so it can be rebooked, and the lab managers are emailed automatically.</p>
-      <div id="booking-filter" class="pill-tabs booking-filter" role="tablist" aria-label="Show bookings"></div>
-      <p id="booking-status" class="status" role="status"></p>
-      <div id="booking-list"></div>
-    </section>
-
     <section id="page-manage" class="upload" hidden>
       <h2>Lab Management</h2>
       <p class="muted">Review requests from lab members, manage who has access and what they're trained for, and choose your emails.</p>
 
       <div class="tabs" role="tablist">
-        <button type="button" class="manage-tab has-badge" role="tab" data-manage="review" aria-selected="true">Review requests<span id="review-badge" class="count-badge" hidden></span></button>
-        <button type="button" class="manage-tab" role="tab" data-manage="members" aria-selected="false">Lab members</button>
-        <button type="button" class="manage-tab" role="tab" data-manage="website" aria-selected="false">Website management</button>
-        <button type="button" class="manage-tab" role="tab" data-manage="settings" aria-selected="false">Settings</button>
+        <button type="button" class="manage-tab has-badge" role="tab" data-manage="review" aria-selected="true">Review Requests<span id="review-badge" class="count-badge" hidden></span></button>
+        <button type="button" class="manage-tab" role="tab" data-manage="members" aria-selected="false">Lab Members</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="website" aria-selected="false">Website Management</button>
+        <button type="button" class="manage-tab" role="tab" data-manage="settings" aria-selected="false">My Settings</button>
       </div>
 
       <div id="manage-review">
@@ -370,10 +374,10 @@
         <h3>Semesters</h3>
         <p class="muted">Finals dates are optional: without them, the USC "Final exams" event just after classes end is used.</p>
         <div id="semesters-editor"></div>
-        <h3>Holidays, breaks and other USC dates</h3>
+        <h3>Holidays, Breaks, and Other USC Dates</h3>
         <div id="events-editor"></div>
         <button id="save-academic" type="button" class="primary">Save academic calendar</button>
-        <h3>Staff holidays</h3>
+        <h3>Staff Holidays</h3>
         <p class="muted">Days the lab is closed, when no participant visits are scheduled. A holiday on a Saturday is observed the Friday before, and one on a Sunday the Monday after.</p>
         <div id="holidays-editor"></div>
         <button id="save-holidays" type="button" class="primary">Save staff holidays</button>
@@ -388,7 +392,7 @@
       <div id="manage-members" hidden>
         <div id="member-picker"></div>
         <div id="member-list"></div>
-        <h3>Add someone</h3>
+        <h3>Add Someone</h3>
         <div class="field-row">
           <label class="field">USC email
             <input id="new-member-email" type="email" autocomplete="off">
@@ -431,13 +435,22 @@
     <div id="dialog-actions" class="dialog-actions"></div>
   </dialog>
 
+  <!-- Opens over any other dialog before something that sends an email: who gets it, and an optional message. -->
+  <dialog id="email-dialog" class="event-dialog email-dialog" aria-labelledby="email-dialog-title">
+    <div class="dialog-head">
+      <h2 id="email-dialog-title"></h2>
+    </div>
+    <div id="email-dialog-body" class="dialog-body"></div>
+    <div id="email-dialog-actions" class="dialog-actions"></div>
+  </dialog>
+
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" integrity="sha384-ZaR6mWzmJtrRibZ1Vm7SoHFr8OXjyAuGAXalGDKqbxFT18oi/z+oZLIRFkpeNor1" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" integrity="sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" integrity="sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3" crossorigin="anonymous"></script>
   <script src="firebase-config.js?v=4"></script>
-  <script src="store.js?v=10"></script>
+  <script src="store.js?v=11"></script>
   <script src="parser.js?v=2"></script>
-  <script src="scheduling.js?v=16"></script>
-  <script src="app.js?v=33"></script>
+  <script src="scheduling.js?v=17"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>
